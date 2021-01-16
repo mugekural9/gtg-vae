@@ -6,7 +6,7 @@ from torch.nn.init import xavier_uniform
 from transformer_decoder import TransformerDecoder
 from embeddings import Embeddings
 from dataset import load_fields_from_vocab, save_fields_to_vocab
-
+ 
 from utils.misc import use_gpu
 import utils.constants as Constants
 
@@ -29,11 +29,18 @@ class JointModel(nn.Module):
 
 
 def load_test_model(opt): 
+  print("load test model")
   model_path = opt["model_path"]
+  print("this is model_path")
 
+  print("model_path", model_path)
   checkpoint = torch.load(model_path,
                           map_location=lambda storage,
-                          loc:storage)                                                                   
+                          loc:storage)
+
+
+  print("Here is checkpoint")
+  
   fields = load_fields_from_vocab(checkpoint['vocab'])                                                                               
   model_opt = checkpoint['opt']
 

@@ -1,4 +1,4 @@
-amr_data_dir: &amr_data_dir ../data/AMR/amr_2.0
+amr_data_dir: &amr_data_dir ../data/MRP2020/cf
 
 # Vocabulary
 vocab:
@@ -14,9 +14,9 @@ vocab:
 # Data parameters
 data:
   data_dir: *amr_data_dir
-  train_data: train.txt.features.preproc
-  dev_data: dev.txt.features.preproc
-  test_data: test.txt.features.preproc
+  train_data: training/amr.mrp
+  dev_data: validation/amr.mrp
+  test_data: validation/amr.mrp
   data_type: AMR
   batch_first: True
   iterator:

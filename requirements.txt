@@ -9,5 +9,5 @@ torch_sparse
 torch_scatter
 pyyaml
 nltk
-torch
+#torch
 torchtext

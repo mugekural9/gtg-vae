@@ -71,7 +71,7 @@ class AbstractMeaningRepresentationDatasetReader(DatasetReader):
         file_path = cached_path(file_path)
         logger.info("Reading instances from lines in file at: %s", file_path)
         for i,amr in enumerate(AMRIO.read(file_path)):
-            #if i>1:
+            #if i>10:
             #    break
             # print(amr.graph.get_nodes)
             # print("\n\n---")

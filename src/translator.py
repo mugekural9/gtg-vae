@@ -92,38 +92,40 @@ class Translator(object):
   
 
 def build_translator(opt):
+  print("Hello translatoe")
   fields, model = nmt_model.load_test_model(opt)                                                                 
+
   model.to("cuda")
   translator = Translator(model, fields, opt)
   return translator
   
 
 
-# if __name__ == "__main__":
+if __name__ == "__main__":
   
-#   model_opt = dict()
-#   model_opt["dec_rnn_size"] = 512
-#   model_opt["share_embeddings"] = True
-#   model_opt["share_decoder_embeddings"] = True
-#   model_opt["param_init_glorot"] = True
-#   model_opt["dropout"] = 0.1
-#   model_opt["model_path"] = "/home/mugekural/dev/git/gtg-vae/src/ptm_mt_en2deB_sem_enM.pt"
-#   model_opt["src_word_vec_size"] = 512
-#   model_opt["tgt_word_vec_size"] = 512
-#   model_opt["position_encoding"] = True
-#   model_opt["optim"] = 'adam'
-#   model_opt["heads"] = 8
-#   model_opt["dec_layers"] = 6
-#   model_opt["transformer_ff"] = 2048
-#   model_opt["src"] = 'sent.tok.bpe' 
-#   model_opt["gpu"] = 0
-#   model_opt["task_type"] = 'task2'
-#   model_opt["minimal_relative_prob"] = 0.01
-#   model_opt["batch_size"] = 32
+  model_opt = dict()
+  model_opt["dec_rnn_size"] = 512
+  model_opt["share_embeddings"] = True
+  model_opt["share_decoder_embeddings"] = True
+  model_opt["param_init_glorot"] = True
+  model_opt["dropout"] = 0.1
+  model_opt["model_path"] = "/kuacc/users/mugekural/workfolder/dev/git/gtg-vae/src/ptm_mt_en2deB_sem_enM.pt"
+  model_opt["src_word_vec_size"] = 512
+  model_opt["tgt_word_vec_size"] = 512
+  model_opt["position_encoding"] = True
+  model_opt["optim"] = 'adam'
+  model_opt["heads"] = 8
+  model_opt["dec_layers"] = 6
+  model_opt["transformer_ff"] = 2048
+  model_opt["src"] = 'sent.tok.bpe' 
+  model_opt["gpu"] = 0
+  model_opt["task_type"] = 'task2'
+  model_opt["minimal_relative_prob"] = 0.01
+  model_opt["batch_size"] = 32
 
-#   translator = build_translator(model_opt)
-#   src_iter= make_text_iterator_from_file(model_opt["src"])
-#   tgt_iter= make_text_iterator_from_file(model_opt["src"])
-#   translator.translate(src_data_iter=src_iter,
-#                        tgt_data_iter=tgt_iter,
-#                        batch_size=model_opt["batch_size"])
+  translator = build_translator(model_opt)
+  src_iter= make_text_iterator_from_file(model_opt["src"])
+  tgt_iter= make_text_iterator_from_file(model_opt["src"])
+  translator.translate(src_data_iter=src_iter,
+                       tgt_data_iter=tgt_iter,
+                       batch_size=model_opt["batch_size"])
