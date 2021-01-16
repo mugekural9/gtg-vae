@@ -1,0 +1,13 @@
+overrides
+spacy
+ftfy
+boto3
+penman==0.6.2
+pytorch_pretrained_bert
+torch_geometric
+torch_sparse
+torch_scatter
+pyyaml
+nltk
+torch
+torchtext
