@@ -9,11 +9,15 @@ from data.dataset_builder import dataset_from_params, iterator_from_params
 from data.vocabulary import Vocabulary
 
 from torch_geometric.data import Data, DataLoader
-from torch_geometric.nn import GCNConv, GAE,VGAE, global_max_pool
-from graphvae import *
+from gtg import GTG
 import json
 from translator import build_translator
- 
+import torch.optim as optim
+import logging
+
+logging.basicConfig(filename='gtg.log', encoding='utf-8', level=logging.DEBUG)
+logging.debug('This message should go to the log file')
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
 model_opt = dict()
 model_opt["dec_rnn_size"] = 512
@@ -36,8 +40,14 @@ model_opt["minimal_relative_prob"] = 0.01
 model_opt["batch_size"] = 32
 
 
+nodelabel_stoi = dict()
+nodelabel_itos = dict()
+nodelabel_stoi["<unk>"]=0
+nodelabel_stoi["<pad>"]=1
+nodelabel_itos[0] = "<unk>"
+nodelabel_itos[1] = "<pad>"
 
-def loaddata(params, src_dict, nodeembeddings):
+def loaddata(params, src_dict, nodeembeddings, maxnode):
 
     # Load data...
     data_params = params['data']
@@ -49,6 +59,7 @@ def loaddata(params, src_dict, nodeembeddings):
     train_generator_tqdm = Tqdm.tqdm(train_generator, total=num_training_batches)
     data_list = []; meta_list = [];
 
+    
     for batch in train_generator_tqdm:
         # batch contains bunch of AMRs
         for amr in batch.instances:
@@ -57,94 +68,206 @@ def loaddata(params, src_dict, nodeembeddings):
             nodes = dict()
             edges = []
 
-            node_ids = []; snttoken_ids = [] # with these ids we'll able to forward the embeddings
+            node_ids = []; node_ids_local = []; snttoken_ids = [] # with these ids we'll able to forward the embeddings
             i = 0
             for (s,r,t) in graph._triples:
-                if r=='instance':
+                if r=='instance' and len(nodes) <maxnode:
                     nodes[s] = (i,t) # t will be the nodelabel.
                     i+=1
 
-            for token in src_tokens:
+            fileprefix = amr.id.split(" ::")[0] + "___"
+            #f2 = open(fileprefix+'sent.tok', 'w')
+            #f2.write(' '.join([str(elem) for elem in src_tokens]))
+            #f2.close()
+            #os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes < '+fileprefix+'sent.tok > '+fileprefix+'sent.tok.bpe')
+            f3 = open(fileprefix+"sent.tok.bpe", "r")
+            bpe_sent = f3.readline()
+            bpe_tokens = bpe_sent.split(" ")
+            #print("bpe_tokens:", bpe_tokens)
+            f3.close()
+
+            for token in bpe_tokens:
                 snttokenid = src_dict[token]
                 snttoken_ids.append(snttokenid)
-                
+
+            # Add BOS (<s>) and EOS (</s>) to the sentence...
+            snttoken_ids = [2] + snttoken_ids 
+            snttoken_ids.append(4)
+
             for edge in graph.edges():
-                s_id = nodes[edge.source][0]
-                t_id = nodes[edge.target][0]
-                edges.append([s_id, t_id])
-                edges.append([t_id, s_id])
-                ##TODO:For now assuming nondirected AMR graphs; both edge and reverse included
+                if edge.source in nodes and edge.target in nodes:
+                    s_id = nodes[edge.source][0]
+                    t_id = nodes[edge.target][0]
+                    edges.append([s_id, t_id])
+                    edges.append([t_id, s_id])
+                    ##TODO:For now assuming nondirected AMR graphs; both edge and reverse included
+
+            #f4 = open(fileprefix+'node.tok', 'w')
+            #for node, values in nodes.items():
+            #    nodelabel = values[1]
+            #    f4.write(nodelabel+"\n")
+            #f4.close()
                 
-        
-            for node, values in nodes.items():
-                nodelabel = values[1]
+            #os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes <'+fileprefix+'node.tok > '+fileprefix+'node.tok.bpe')
+            f5 = open(fileprefix+"node.tok.bpe", "r")
+            bpe_node = f5.read()
+            node_bpe_tokens = bpe_node.split("\n")
+            #print("node_bpe_tokens:", node_bpe_tokens)
+            f5.close()
+               
+            
+            for nodetoken in node_bpe_tokens[:-1]: #last one is trivial
+                nodelabel = nodetoken.split(" ")[0]
+                if nodelabel not in nodelabel_stoi:
+                    idx = len(nodelabel_stoi)
+                    nodelabel_stoi[nodelabel] = idx
+                    nodelabel_itos[idx] = nodelabel
                 nodevocabid = src_dict[nodelabel]
                 node_ids.append(nodevocabid)
+                node_ids_local.append(nodelabel_stoi[nodelabel])
+
+            #print("node_ids_local:", node_ids_local)
+            #print("snttoken_ids:", snttoken_ids)
             
+            # Pad node ids to have max number of nodes
+            missing_counts = maxnode -len(node_ids)
+            if missing_counts > 0:
+                node_ids.extend([1] * missing_counts)
+                node_ids_local.extend([1] * missing_counts)
+            elif missing_counts < 0:
+                node_ids = node_ids[:missing_counts]
+                node_ids_local = node_ids_local[:missing_counts]
+
             nodeids = torch.LongTensor(node_ids).to(device).transpose(-1,0)
             nodeids = torch.unsqueeze(nodeids, 1)
-            
+
+            nodeidslocal = torch.LongTensor(node_ids_local).to(device).transpose(-1,0)
+            nodeidslocal = torch.unsqueeze(nodeidslocal, 1)
+                    
             node_features = nodeembeddings(nodeids)
             node_features = torch.squeeze(node_features, 1)
+
+            #snttoken_ids = torch.tensor(snttoken_ids, dtype=torch.long).unsqueeze(1)
+            x = torch.tensor(node_features, dtype=torch.float) # nodecount,hdim
             
-            x = torch.tensor(node_features, dtype=torch.float) # Nodecount,Hdim
             edge_index = torch.tensor(edges, dtype=torch.long)
             data = Data(x=x, edge_index=edge_index.t().contiguous())
             data.__setitem__("snttoken_ids", snttoken_ids)
+            data.__setitem__("nodetoken_ids", nodeids)
+            #data.__setitem__("nodetoken_ids", nodeidslocal)
             data_list.append(data)
             meta_list.append(graph)
-         ##end of one AMR
+        ##end of one AMR
     #end of batch
-    return data_list
+   
+    return data_list #, nodelabel_stoi, nodelabel_itos
 
 
-def train(data_list, textencoder_model):
-    # Build model...
-    input_dim = 512; output_dim = 512; nmax = 30; edgeclass_num = 15; nodeclass_num = 20
-    encoder = VGAE_encoder(input_dim, out_channels=output_dim)
-    decoder = VGAE_decoder(output_dim, nmax, edgeclass_num, nodeclass_num).to(device)
-    model   = VGAE(encoder).to(device)
+def train(train_loader, test_loader, model, epochs, src_dict, node_dict):
 
-    train_loader = DataLoader(data_list, batch_size=32)
-    for step, data in enumerate(train_loader):
-        x, edge_index, batch = data.x.to(device), data.edge_index.to(device), data.batch.to(device)
-        z = model.encode(x, edge_index)
-        graph_z = global_max_pool(z, batch) # (B,Zdim)
-        # decoder(z)
-
-        src_seq = torch.zeros(1, graph_z.shape[0]) # dummy seq to bypass masking
-        src_enc = graph_z.unsqueeze(0) # (1,B,Zdim)
-        textencoder_model.decoder.init_state(src_seq, src_enc) # src_seq should be 1,B, src_enc 1,B,Zdim
-
-        # Pad snttoken ids in batch...
+    # Pad snttoken ids in batch...(looking for a better way)
+    batched_snttokens_ids_padded = []
+    for data in train_loader:
         dec_seq = data.__getitem__("snttoken_ids")
-        list_len = [len(i) for i in dec_seq]
-        max_seq_len  = max(list_len)
+        max_seq_len = max([len(i) for i in dec_seq])
+        torch_dec_seq=[]
         for seq in dec_seq:
-            while len(seq) < max_seq_len:
-                seq.append(0)
-
-        dec_seq = torch.tensor(dec_seq).to(device).transpose(0,1) # Tdec, B
-        dec_output, *_ = textencoder_model.decoder(dec_seq, step=None) # src_seq as dec_seq, but any need for shifting? dec_output: (Tdec, B, Zdim)         
-        text_z = dec_output[:1, :,:].squeeze(0)
-
-        # print("graph_z:", graph_z.shape)
-        # print("text_z:", text_z.shape)
+            torch_dec_seq.append(torch.tensor(seq, dtype=torch.long))
+        dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
+        batched_snttokens_ids_padded.append(dec_seq)
         
-        
+    opt = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    # opt = optim.Adam(model.parameters())
     
+    for epoch in range(epochs):
+        print("epoch ", epoch, " ...")
+        total_loss = 0
+        # model.train()
+        model.eval()
+
+        correct_nodes = 0
+        for step, data in enumerate(train_loader):
+            opt.zero_grad()
+            
+            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+
+            # Encode graph and text (mse_loss was the 2nd)
+            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+
+            correct_nodes += correct_predicted_node_tokens.item()
+            loss = graph_reconstruction_loss + mse_loss
+            #loss = mse_loss
+            loss.backward()
+            opt.step()
+            total_loss += loss.item() * data.num_graphs          
+      
+        total_loss /= len(train_loader.dataset)
+        correct_nodes /= len(train_loader.dataset)
+        print("trn_loss:",total_loss)
+        print("trn_correct_nodes:", correct_nodes)
+        print(len(train_loader.dataset))
+
+        #if epoch % 1 == 0:
+        #    test_loss = test(test_loader, model)
+            #print('test_loss: ', test_loss)
+        
+
+        
+def test(loader, model):
+    # Pad snttoken ids in batch...(looking for a better way)
+    batched_snttokens_ids_padded = []
+    for data in loader:
+        dec_seq = data.__getitem__("snttoken_ids")
+        max_seq_len = max([len(i) for i in dec_seq])
+        torch_dec_seq=[]
+        for seq in dec_seq:
+            torch_dec_seq.append(torch.tensor(seq, dtype=torch.long))
+        dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
+        batched_snttokens_ids_padded.append(dec_seq)
+        
+    model.eval()
+    total_loss = 0;  correct_nodes = 0
+    for (step, data) in enumerate(loader):
+        with torch.no_grad():            
+            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device),batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+
+            # Encode graph and text
+            graph_reconstruction_loss, mse_loss, correct_predicted_node_tokens = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict)
+            correct_nodes += correct_predicted_node_tokens.item()
+            loss = graph_reconstruction_loss + mse_loss
+            total_loss += loss.item() * data.num_graphs          
+      
+    total_loss /= len(loader.dataset)
+    correct_nodes /= len(loader.dataset)
+    print("test_loss:",total_loss)
+    print("test_correct_nodes:", correct_nodes)
+    print(len(loader.dataset))
+        
+    return total_loss
+
+        
 if __name__ == "__main__":
 
     translator = build_translator(model_opt)
-    translator_model = translator.model.to(device)
+    text_transformer = translator.model
     fields = translator.fields
-    nodeembeddings = translator.model.decoder.embeddings
+    nodeembeddings = text_transformer.decoder.embeddings
     src_dict = fields["src"].vocab
-    #print(src_dict.stoi)
-    
     parser = argparse.ArgumentParser('datareader.py')
     parser.add_argument('params', help='Parameters YAML file.')
     args = parser.parse_args()
     params = Params.from_file(args.params)
-    data_list = loaddata(params, src_dict, nodeembeddings)
-    train(data_list, translator_model)
+    nmax = 15
+    batch_size = 64
+    # data_list, nodelabel_stoi, nodelabel_itos = loaddata(params, src_dict, nodeembeddings, nmax)
+    data_list  = loaddata(params, src_dict, nodeembeddings, nmax)
+
+    train_loader = DataLoader(data_list[:30000], batch_size=batch_size)
+    test_loader = DataLoader(data_list[30000:], batch_size=batch_size)
+    epochs = 100
+    
+    # Build model...
+    input_dim = 512; output_dim = 512;  edgeclass_num = 15; nodeclass_num = 38926 #len(nodelabel_itos)
+    model = GTG(input_dim, output_dim, nmax, edgeclass_num, nodeclass_num, text_transformer).to(device)
+    train(train_loader, test_loader, model, epochs, src_dict, nodelabel_itos)
+ 
