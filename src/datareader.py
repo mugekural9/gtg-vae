@@ -47,6 +47,22 @@ nodelabel_stoi["<pad>"]=1
 nodelabel_itos[0] = "<unk>"
 nodelabel_itos[1] = "<pad>"
 
+
+#bpe_data_sent = dict()
+#bpe_data_node = dict()
+
+
+# bpe_data_sent[fileprefix] = bpe_tokens
+# bpe_data_node[fileprefix] = node_bpe_tokens
+
+a_file = open("sent_bpes.json", "r")
+bpe_data_sent = a_file.read()
+bpe_data_sent = json.loads(bpe_data_sent)
+
+b_file = open("node_bpes.json", "r")
+bpe_data_node = b_file.read()
+bpe_data_node = json.loads(bpe_data_node)
+
 def loaddata(params, src_dict, nodeembeddings, maxnode):
 
     # Load data...
@@ -75,16 +91,31 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
                     nodes[s] = (i,t) # t will be the nodelabel.
                     i+=1
 
-            fileprefix = amr.id.split(" ::")[0] + "___"
-            #f2 = open(fileprefix+'sent.tok', 'w')
-            #f2.write(' '.join([str(elem) for elem in src_tokens]))
-            #f2.close()
-            #os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes < '+fileprefix+'sent.tok > '+fileprefix+'sent.tok.bpe')
-            f3 = open(fileprefix+"sent.tok.bpe", "r")
-            bpe_sent = f3.readline()
-            bpe_tokens = bpe_sent.split(" ")
-            #print("bpe_tokens:", bpe_tokens)
-            f3.close()
+            fileprefix = amr.id.split(" ::")[0]
+            #print(len(bpe_data_sent))
+            if fileprefix not in bpe_data_sent or fileprefix not in bpe_data_node:
+                continue
+            bpe_tokens =  bpe_data_sent[fileprefix]
+            node_bpe_tokens = bpe_data_node[fileprefix] 
+
+
+            # filename = fileprefix+'sent.tok.bpe'
+            # filename2 = fileprefix+'node.tok.bpe'
+
+            # if not os.path.isfile('/kuacc/users/mugekural/workfolder/dev/git/gtg-vae/src/sent-toks-bpes/'+filename) or not os.path.isfile('/kuacc/users/mugekural/workfolder/dev/git/gtg-vae/src/node-toks-bpes/'+filename2):
+            #      print ("File doesnot exist")
+            #      continue
+            # # else:
+            # #     print ("File not exist")
+            # #     f2 = open(fileprefix+'sent.tok', 'w')
+            # #     f2.write(' '.join([str(elem) for elem in src_tokens]))
+            # #     f2.close()
+            # #     os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes < '+fileprefix+'sent.tok > '+fileprefix+'sent.tok.bpe')
+            # f3 = open("sent-toks-bpes/"+fileprefix+"sent.tok.bpe", "r")
+            # bpe_sent = f3.readline()
+            # bpe_tokens = bpe_sent.split(" ")
+            # # print("bpe_tokens:", bpe_tokens)
+            # f3.close()
 
             for token in bpe_tokens:
                 snttokenid = src_dict[token]
@@ -102,20 +133,23 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
                     edges.append([t_id, s_id])
                     ##TODO:For now assuming nondirected AMR graphs; both edge and reverse included
 
-            #f4 = open(fileprefix+'node.tok', 'w')
-            #for node, values in nodes.items():
-            #    nodelabel = values[1]
-            #    f4.write(nodelabel+"\n")
-            #f4.close()
+            # f4 = open(fileprefix+'node.tok', 'w')
+            # for node, values in nodes.items():
+            #     nodelabel = values[1]
+            #     f4.write(nodelabel+"\n")
+            # f4.close()
                 
             #os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes <'+fileprefix+'node.tok > '+fileprefix+'node.tok.bpe')
-            f5 = open(fileprefix+"node.tok.bpe", "r")
-            bpe_node = f5.read()
-            node_bpe_tokens = bpe_node.split("\n")
-            #print("node_bpe_tokens:", node_bpe_tokens)
-            f5.close()
-               
+            # f5 = open("node-toks-bpes/"+fileprefix+"node.tok.bpe", "r")
+            # bpe_node = f5.read()
+            # node_bpe_tokens = bpe_node.split("\n")
+            # #print("node_bpe_tokens:", node_bpe_tokens)
+            # f5.close()
+
             
+            # bpe_data_sent[fileprefix] = bpe_tokens
+            # bpe_data_node[fileprefix] = node_bpe_tokens
+
             for nodetoken in node_bpe_tokens[:-1]: #last one is trivial
                 nodelabel = nodetoken.split(" ")[0]
                 if nodelabel not in nodelabel_stoi:
@@ -159,7 +193,17 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
             meta_list.append(graph)
         ##end of one AMR
     #end of batch
-   
+
+    # bpe_sent_json = json.dumps(bpe_data_sent)
+    # f = open("sent_bpes.json","w")
+    # f.write(bpe_sent_json)
+    # f.close()
+
+    # bpe_node_json = json.dumps(bpe_data_node)
+    # f = open("node_bpes.json","w")
+    # f.write(bpe_node_json)
+    # f.close()
+
     return data_list #, nodelabel_stoi, nodelabel_itos
 
 
@@ -176,27 +220,27 @@ def train(train_loader, test_loader, model, epochs, src_dict, node_dict):
         dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
         batched_snttokens_ids_padded.append(dec_seq)
         
-    opt = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-    # opt = optim.Adam(model.parameters())
+    # opt = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    opt = optim.Adam(model.parameters())
     
     for epoch in range(epochs):
         print("epoch ", epoch, " ...")
         total_loss = 0
-        # model.train()
-        model.eval()
+        model.train()
+        #model.eval()
 
         correct_nodes = 0
         for step, data in enumerate(train_loader):
             opt.zero_grad()
             
             x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+            nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
 
-            # Encode graph and text (mse_loss was the 2nd)
+            # Encode graph and text
             graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
 
             correct_nodes += correct_predicted_node_tokens.item()
             loss = graph_reconstruction_loss + mse_loss
-            #loss = mse_loss
             loss.backward()
             opt.step()
             total_loss += loss.item() * data.num_graphs          
@@ -208,12 +252,12 @@ def train(train_loader, test_loader, model, epochs, src_dict, node_dict):
         print(len(train_loader.dataset))
 
         #if epoch % 1 == 0:
-        #    test_loss = test(test_loader, model)
-            #print('test_loss: ', test_loss)
+        #    test_loss = test(test_loader, model, src_dict, node_dict)
+            
         
 
         
-def test(loader, model):
+def test(loader, model, src_dict, node_dict):
     # Pad snttoken ids in batch...(looking for a better way)
     batched_snttokens_ids_padded = []
     for data in loader:
@@ -228,13 +272,16 @@ def test(loader, model):
     model.eval()
     total_loss = 0;  correct_nodes = 0
     for (step, data) in enumerate(loader):
-        with torch.no_grad():            
-            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device),batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+        with torch.no_grad():
+            
+            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+            nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
 
-            # Encode graph and text
-            graph_reconstruction_loss, mse_loss, correct_predicted_node_tokens = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict)
+            # Encode graph and text (mse_loss was the 2nd)
+            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+
             correct_nodes += correct_predicted_node_tokens.item()
-            loss = graph_reconstruction_loss + mse_loss
+            loss = graph_reconstruction_loss + mse_loss                       
             total_loss += loss.item() * data.num_graphs          
       
     total_loss /= len(loader.dataset)
@@ -247,7 +294,7 @@ def test(loader, model):
 
         
 if __name__ == "__main__":
-
+    print("Oh hi")
     translator = build_translator(model_opt)
     text_transformer = translator.model
     fields = translator.fields
@@ -257,17 +304,17 @@ if __name__ == "__main__":
     parser.add_argument('params', help='Parameters YAML file.')
     args = parser.parse_args()
     params = Params.from_file(args.params)
-    nmax = 15
-    batch_size = 64
+    nmax = 10
+    batch_size = 128
     # data_list, nodelabel_stoi, nodelabel_itos = loaddata(params, src_dict, nodeembeddings, nmax)
     data_list  = loaddata(params, src_dict, nodeembeddings, nmax)
 
-    train_loader = DataLoader(data_list[:30000], batch_size=batch_size)
-    test_loader = DataLoader(data_list[30000:], batch_size=batch_size)
+    train_loader = DataLoader(data_list[:5000], batch_size=batch_size)
+    test_loader = DataLoader(data_list[5000:6000], batch_size=batch_size)
     epochs = 100
     
     # Build model...
     input_dim = 512; output_dim = 512;  edgeclass_num = 15; nodeclass_num = 38926 #len(nodelabel_itos)
-    model = GTG(input_dim, output_dim, nmax, edgeclass_num, nodeclass_num, text_transformer).to(device)
+    model = GTG(input_dim, output_dim, nmax, edgeclass_num, nodeclass_num, text_transformer).to(device) #text_transformer
     train(train_loader, test_loader, model, epochs, src_dict, nodelabel_itos)
  

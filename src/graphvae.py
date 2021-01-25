@@ -66,17 +66,16 @@ class GraphVAE(torch.nn.Module):
 
     def recon_loss(self, a_hat, f_hat, x, pos_edge_index, batch, nodetoken_ids, src_dict, node_dict):
         # pos_edge_index: (2, num_of_edges)
-        # f_hat: (B, nodelabelsize, maxnode)
+        # f_hat: (B, maxnode, nodelabelsize)
         # a_hat: (B, maxnode, maxnode)
         # x: (maxnode, nodefeatures)
+        # nodetoken_ids: (B, maxnode)
 
         batch_size = f_hat.size(0)
-        maxnode = f_hat.size(2)
+        maxnode = f_hat.size(1)
 
         # F_hat loss
         # Create indexing matrix for batch: [batch, 1]
-        nodetoken_ids = nodetoken_ids.view(f_hat.size(0), f_hat.size(2)) # B, maxnode
-        f_hat = f_hat.transpose(1,2) # B, maxnode, nodelabelsize
         batch_index = torch.arange(0, batch_size).view(batch_size, 1)
         node_index  = torch.arange(0, maxnode).view(1, maxnode).repeat(batch_size,1)
         m =  nn.Softmax(dim=2)
@@ -134,12 +133,14 @@ class GraphVAE(torch.nn.Module):
         neg_probs = a_hat[graph_coords.data, edgesource_coords.data, edgetarget_coords.data]
         neg_loss = -torch.log(1 - torch.sigmoid(neg_probs + 1e-15).mean())
 
+                
+        kl_loss = 1 / x.size(0) * self.kl_loss()
+        # print("kl_loss:", kl_loss)
         # print("nodelabel_loss:", nodelabel_loss)
         # print("pos_loss:", pos_loss)
         # print("neg_loss:", neg_loss)
-        # kl_loss = 1 / x.size(0) * self.kl_loss()
- 
-        return nodelabel_loss + pos_loss + neg_loss, correct_predicted_node_tokens #+ kl_loss
+        
+        return kl_loss+ nodelabel_loss+ pos_loss+ neg_loss, correct_predicted_node_tokens
  
 
 
@@ -174,6 +175,7 @@ class VGAE_decoder(torch.nn.Module):
        self.adj_linear = Linear(in_channels, nmax*nmax)
        #self.edgeclass_linear = Linear(in_channels, edgeclass_num*nmax*nmax)
        self.nodeclass_linear = Linear(in_channels, nodeclass_num*nmax)
+       self.nodefeatures_linear = Linear(in_channels, in_channels*nmax)
             
 
     def forward(self, z):
@@ -184,7 +186,9 @@ class VGAE_decoder(torch.nn.Module):
         F_hat = F.relu(F_hat)
         A_hat = torch.reshape(A_hat, (-1, self.nmax, self.nmax)) # GinBatch, nmax, nmax 
         # E_hat = torch.reshape(E_hat, (-1, self.edgeclass_num, self.nmax, self.nmax)) # GinBatch, edgeclass_num, nmax, nmax
-        F_hat = torch.reshape(F_hat, (-1, self.nodeclass_num, self.nmax)) # GinBatch, nodeclass_num, nmax
+        F_hat = torch.reshape(F_hat, (-1, self.nmax, self.nodeclass_num)) # GinBatch, nmax, nodeclass_num
 
-        return A_hat, F_hat # E_hat 
+        Feat_hat = self.nodefeatures_linear(z)
+        Feat_hat = torch.reshape(Feat_hat, (-1, self.nmax, self.in_channels)) # Ginbatch, nmax, feature_dim
+        return A_hat, F_hat, Feat_hat # E_hat 
 

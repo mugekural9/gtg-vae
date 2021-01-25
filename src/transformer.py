@@ -46,8 +46,8 @@ def load_test_model(opt):
 
   model = build_base_model(opt, fields, use_gpu(opt), checkpoint)
 
-  model.eval()                                                                                                                       
-  model.generator.eval()                                                                                                             
+  #model.eval()                                                                                                                       
+  #model.generator.eval()                                                                                                             
   return fields, model
 
 
@@ -175,6 +175,6 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
       #pdb.set_trace()                                                                                                                   
 
   # Add generator to model (this registers it as parameter of model).                                                                
-  model.generator = generator                                                                                                        
+  # model.generator = generator                                                                                                        
   model.to(device)                                                                                                                  
   return model          
