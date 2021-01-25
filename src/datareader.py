@@ -221,43 +221,48 @@ def train(train_loader, test_loader, model, epochs, src_dict, node_dict):
         batched_snttokens_ids_padded.append(dec_seq)
         
     # opt = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-    opt = optim.Adam(model.parameters())
+    opt = optim.Adam(model.parameters(), lr=0.001)
     
     for epoch in range(epochs):
         print("epoch ", epoch, " ...")
         total_loss = 0
         model.train()
-        #model.eval()
 
-        correct_nodes = 0
+        correct_nodes = 0; roc_auc_score_tot = 0; average_precision_score_tot = 0; maxnode = 0
         for step, data in enumerate(train_loader):
             opt.zero_grad()
             
             x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
             nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
-
+            maxnode = nodetoken_ids.size(1)
+            
             # Encode graph and text
-            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss, roc_auc_score, average_precision_score  = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
 
             correct_nodes += correct_predicted_node_tokens.item()
+            roc_auc_score_tot += roc_auc_score.item() * data.num_graphs
+            average_precision_score_tot += average_precision_score.item() * data.num_graphs
+            
             loss = graph_reconstruction_loss + mse_loss
             loss.backward()
             opt.step()
             total_loss += loss.item() * data.num_graphs          
-      
+        
         total_loss /= len(train_loader.dataset)
         correct_nodes /= len(train_loader.dataset)
-        print("trn_loss:",total_loss)
-        print("trn_correct_nodes:", correct_nodes)
-        print(len(train_loader.dataset))
+        roc_auc_score_tot /= len(train_loader.dataset)
+        average_precision_score_tot /= len(train_loader.dataset)
+        node_label_acc = correct_nodes / maxnode 
+        print("Trainsize: {} Epoch {} - Loss: {} ROC_AUC: {} Precision: {}, Node label accuracy: {}".format(len(train_loader.dataset), epoch, total_loss, roc_auc_score_tot, average_precision_score_tot, node_label_acc))
 
-        #if epoch % 1 == 0:
-        #    test_loss = test(test_loader, model, src_dict, node_dict)
+                   
+        if epoch % 2 == 0:
+            test_loss = test(test_loader, model, src_dict, node_dict, epoch)
             
         
 
         
-def test(loader, model, src_dict, node_dict):
+def test(loader, model, src_dict, node_dict, epoch):
     # Pad snttoken ids in batch...(looking for a better way)
     batched_snttokens_ids_padded = []
     for data in loader:
@@ -270,26 +275,30 @@ def test(loader, model, src_dict, node_dict):
         batched_snttokens_ids_padded.append(dec_seq)
         
     model.eval()
-    total_loss = 0;  correct_nodes = 0
+    total_loss = 0;  correct_nodes = 0; roc_auc_score_tot = 0; average_precision_score_tot = 0
     for (step, data) in enumerate(loader):
         with torch.no_grad():
             
             x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
             nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
-
-            # Encode graph and text (mse_loss was the 2nd)
-            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+            maxnode = nodetoken_ids.size(1)
+        
+            # Encode graph and text
+            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss, roc_auc_score, average_precision_score = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
 
             correct_nodes += correct_predicted_node_tokens.item()
+            roc_auc_score_tot += roc_auc_score.item() * data.num_graphs
+            average_precision_score_tot += average_precision_score.item() * data.num_graphs                       
             loss = graph_reconstruction_loss + mse_loss                       
             total_loss += loss.item() * data.num_graphs          
       
     total_loss /= len(loader.dataset)
     correct_nodes /= len(loader.dataset)
-    print("test_loss:",total_loss)
-    print("test_correct_nodes:", correct_nodes)
-    print(len(loader.dataset))
-        
+    roc_auc_score_tot /= len(loader.dataset)
+    average_precision_score_tot /= len(loader.dataset)
+    node_label_acc = correct_nodes / maxnode 
+    print("Testsize: {} Epoch {} - Loss: {} ROC_AUC: {} Precision: {}, Node label accuracy: {}".format(len(loader.dataset), epoch, total_loss, roc_auc_score_tot, average_precision_score_tot, node_label_acc))
+
     return total_loss
 
         
@@ -304,14 +313,14 @@ if __name__ == "__main__":
     parser.add_argument('params', help='Parameters YAML file.')
     args = parser.parse_args()
     params = Params.from_file(args.params)
-    nmax = 10
+    nmax = 15
     batch_size = 128
     # data_list, nodelabel_stoi, nodelabel_itos = loaddata(params, src_dict, nodeembeddings, nmax)
     data_list  = loaddata(params, src_dict, nodeembeddings, nmax)
 
-    train_loader = DataLoader(data_list[:5000], batch_size=batch_size)
-    test_loader = DataLoader(data_list[5000:6000], batch_size=batch_size)
-    epochs = 100
+    train_loader = DataLoader(data_list[:10000], batch_size=batch_size)
+    test_loader = DataLoader(data_list[10000:11500], batch_size=batch_size)
+    epochs = 1000
     
     # Build model...
     input_dim = 512; output_dim = 512;  edgeclass_num = 15; nodeclass_num = 38926 #len(nodelabel_itos)

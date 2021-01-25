@@ -1,11 +1,14 @@
 import torch
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, InnerProductDecoder
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.nn import Linear
 from torch_geometric.utils import negative_sampling, remove_self_loops, add_self_loops
+from sklearn.metrics import roc_auc_score, average_precision_score
+
 
 MAX_LOGSTD = 10
+EPS = 1e-15
 
 class GraphVAE(torch.nn.Module):
     """
@@ -21,6 +24,7 @@ class GraphVAE(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, nmax, edgeclass_num, nodeclass_num):
        super(GraphVAE, self).__init__()
        self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
+       self.inner_product_decoder = InnerProductDecoder() 
        self.decoder = VGAE_decoder(hidden_dim, nmax, edgeclass_num, nodeclass_num)
    
     
@@ -64,10 +68,10 @@ class GraphVAE(torch.nn.Module):
             torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
 
 
-    def recon_loss(self, a_hat, f_hat, x, pos_edge_index, batch, nodetoken_ids, src_dict, node_dict):
+    def recon_loss(self, f_hat, feat_hat, x, pos_edge_index, batch, nodetoken_ids, src_dict, node_dict):
         # pos_edge_index: (2, num_of_edges)
         # f_hat: (B, maxnode, nodelabelsize)
-        # a_hat: (B, maxnode, maxnode)
+        # feat_hat: (B, maxnode, feature_dim)
         # x: (maxnode, nodefeatures)
         # nodetoken_ids: (B, maxnode)
 
@@ -80,6 +84,7 @@ class GraphVAE(torch.nn.Module):
         node_index  = torch.arange(0, maxnode).view(1, maxnode).repeat(batch_size,1)
         m =  nn.Softmax(dim=2)
         f_hat = m(f_hat)
+
 
         
         nodelabel_probs = f_hat[batch_index, node_index, nodetoken_ids.data]
@@ -104,45 +109,92 @@ class GraphVAE(torch.nn.Module):
         #     print("gold_tokens:", gold_tokens)
        
         # A_hat loss
-        graphs = batch[pos_edge_index[0]].unsqueeze(0) # 1, num of edges
-        coordinates = torch.cat([graphs, pos_edge_index], 0)  # 3, num_of_edges
-        graph_coords = coordinates[0] # num_of_edges
-        edgesource_coords = coordinates[1] % maxnode
-        edgetarget_coords = coordinates[2] % maxnode 
-        pos_probs = a_hat[graph_coords.data, edgesource_coords.data, edgetarget_coords.data]
-        pos_loss = -torch.log(torch.sigmoid(pos_probs + 1e-15).mean())
+        feat_hat = feat_hat.view(x.size(0), -1)
+        pos_loss = -torch.log(
+            self.inner_product_decoder(feat_hat, pos_edge_index, sigmoid=True) + EPS).mean()
 
-        # print("pos_edge_index:", pos_edge_index)
-        # print("a_hat:", torch.sigmoid(a_hat))
-        # pos_probs = []
-        # for c in zip(graph_coords, edgesource_coords, edgetarget_coords):
-        #     pos_probs.append(a_hat[c[0], c[1], c[2]])
-        # pos_probs = torch.tensor(pos_probs)
-        
-        
         # Do not include self-loops in negative samples
-        all_edge_index_tmp, _ = remove_self_loops(pos_edge_index)
+        pos_edge_index, _ = remove_self_loops(pos_edge_index)
+        pos_edge_index, _ = add_self_loops(pos_edge_index)
+        #if neg_edge_index is None:
+        neg_edge_index = negative_sampling(pos_edge_index, feat_hat.size(0))
+        neg_loss = -torch.log(1 -
+                              self.inner_product_decoder(feat_hat, neg_edge_index, sigmoid=True) +
+                              EPS).mean()
+
+        roc_auc_score, average_precision_score = self.test(feat_hat, pos_edge_index, neg_edge_index)
+        
+        #####
+        # a_hat = torch.bmm(feat_hat, feat_hat.transpose(1,2))
+        # graphs = batch[pos_edge_index[0]].unsqueeze(0) # 1, num of edges
+        # coordinates = torch.cat([graphs, pos_edge_index], 0)  # 3, num_of_edges
+        # graph_coords = coordinates[0] # num_of_edges
+        # edgesource_coords = coordinates[1] % maxnode
+        # edgetarget_coords = coordinates[2] % maxnode 
+        # pos_probs = a_hat[graph_coords.data, edgesource_coords.data, edgetarget_coords.data]
+        # pos_loss = -torch.log(torch.sigmoid(pos_probs + 1e-15)).mean()
+
+        # print("a_hat:", a_hat)
+        # print("pos_edge_index:", pos_edge_index)
+        # # print("pos_edge_index:", pos_edge_index)
+        # # print("a_hat:", torch.sigmoid(a_hat))
+        # # pos_probs = []
+        # # for c in zip(graph_coords, edgesource_coords, edgetarget_coords):
+        # #     pos_probs.append(a_hat[c[0], c[1], c[2]])
+        # # pos_probs = torch.tensor(pos_probs)
+        
+        
+        # # Do not include self-loops in negative samples
+        # all_edge_index_tmp, _ = remove_self_loops(pos_edge_index)
         # all_edge_index_tmp, _ = add_self_loops(all_edge_index_tmp)
 
-        neg_edge_index = negative_sampling(all_edge_index_tmp) #, maxnode) #, pos_edge_index.size(1)) 
-        graphs = batch[neg_edge_index[0]].unsqueeze(0) # 1, num of edges
-        coordinates = torch.cat([graphs, neg_edge_index], 0)  # 3, num_of_edges
-        graph_coords = coordinates[0] # num_of_edges
-        edgesource_coords = coordinates[1] % maxnode
-        edgetarget_coords = coordinates[2] % maxnode
-        neg_probs = a_hat[graph_coords.data, edgesource_coords.data, edgetarget_coords.data]
-        neg_loss = -torch.log(1 - torch.sigmoid(neg_probs + 1e-15).mean())
+        # neg_edge_index = negative_sampling(all_edge_index_tmp) #, maxnode) #, pos_edge_index.size(1)) 
+        # graphs = batch[neg_edge_index[0]].unsqueeze(0) # 1, num of edges
+        # coordinates = torch.cat([graphs, neg_edge_index], 0)  # 3, num_of_edges
+        # graph_coords = coordinates[0] # num_of_edges
+        # edgesource_coords = coordinates[1] % maxnode
+        # edgetarget_coords = coordinates[2] % maxnode
+        # neg_probs = a_hat[graph_coords.data, edgesource_coords.data, edgetarget_coords.data]
+        # neg_loss = -torch.log(1 - torch.sigmoid(neg_probs + 1e-15)).mean()
+        ###
 
-                
+        
         kl_loss = 1 / x.size(0) * self.kl_loss()
         # print("kl_loss:", kl_loss)
         # print("nodelabel_loss:", nodelabel_loss)
         # print("pos_loss:", pos_loss)
         # print("neg_loss:", neg_loss)
         
-        return kl_loss+ nodelabel_loss+ pos_loss+ neg_loss, correct_predicted_node_tokens
+        # print("correct_predicted_node_tokens:", correct_predicted_node_tokens)
+        # print("roc_auc_score:", roc_auc_score)
+        # print("average_precision_score:", average_precision_score)
+        return kl_loss+ nodelabel_loss+ pos_loss+ neg_loss, correct_predicted_node_tokens, roc_auc_score, average_precision_score
  
 
+    def test(self, z, pos_edge_index, neg_edge_index):
+        r"""Given latent variables :obj:`z`, positive edges
+        :obj:`pos_edge_index` and negative edges :obj:`neg_edge_index`,
+        computes area under the ROC curve (AUC) and average precision (AP)
+        scores.
+
+        Args:
+            z (Tensor): The latent space :math:`\mathbf{Z}`.
+            pos_edge_index (LongTensor): The positive edges to evaluate
+                against.
+            neg_edge_index (LongTensor): The negative edges to evaluate
+                against.
+        """
+        pos_y = z.new_ones(pos_edge_index.size(1))
+        neg_y = z.new_zeros(neg_edge_index.size(1))
+        y = torch.cat([pos_y, neg_y], dim=0)
+
+        pos_pred = self.inner_product_decoder(z, pos_edge_index, sigmoid=True)
+        neg_pred = self.inner_product_decoder(z, neg_edge_index, sigmoid=True)
+        pred = torch.cat([pos_pred, neg_pred], dim=0)
+
+        y, pred = y.detach().cpu().numpy(), pred.detach().cpu().numpy()
+
+        return roc_auc_score(y, pred), average_precision_score(y, pred)
 
 
 class VGAE_encoder(torch.nn.Module):
@@ -172,23 +224,24 @@ class VGAE_decoder(torch.nn.Module):
        #self.edgeclass_num = edgeclass_num
        self.nodeclass_num = nodeclass_num
        
-       self.adj_linear = Linear(in_channels, nmax*nmax)
+       # self.adj_linear = Linear(in_channels, nmax*nmax)
        #self.edgeclass_linear = Linear(in_channels, edgeclass_num*nmax*nmax)
        self.nodeclass_linear = Linear(in_channels, nodeclass_num*nmax)
        self.nodefeatures_linear = Linear(in_channels, in_channels*nmax)
             
 
     def forward(self, z):
-        A_hat = self.adj_linear(z)
+        # A_hat = self.adj_linear(z)
         # A_hat = F.relu(A_hat)
         # E_hat = self.edgeclass_linear(z)
         F_hat = self.nodeclass_linear(z)
-        F_hat = F.relu(F_hat)
-        A_hat = torch.reshape(A_hat, (-1, self.nmax, self.nmax)) # GinBatch, nmax, nmax 
+        #F_hat = F.relu(F_hat)
+       
+        # A_hat = torch.reshape(A_hat, (-1, self.nmax, self.nmax)) # GinBatch, nmax, nmax 
         # E_hat = torch.reshape(E_hat, (-1, self.edgeclass_num, self.nmax, self.nmax)) # GinBatch, edgeclass_num, nmax, nmax
         F_hat = torch.reshape(F_hat, (-1, self.nmax, self.nodeclass_num)) # GinBatch, nmax, nodeclass_num
 
         Feat_hat = self.nodefeatures_linear(z)
         Feat_hat = torch.reshape(Feat_hat, (-1, self.nmax, self.in_channels)) # Ginbatch, nmax, feature_dim
-        return A_hat, F_hat, Feat_hat # E_hat 
+        return F_hat, Feat_hat # E_hat 
 
