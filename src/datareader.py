@@ -8,15 +8,23 @@ from utils.params import Params, remove_pretrained_embedding_params
 from data.dataset_builder import dataset_from_params, iterator_from_params
 from data.vocabulary import Vocabulary
 
+from torch_geometric.datasets import Planetoid
+import torch_geometric.transforms as T
+from torch_geometric.utils import train_test_split_edges
+
 from torch_geometric.data import Data, DataLoader
 from gtg import GTG
 import json
 from translator import build_translator
 import torch.optim as optim
 import logging
+from deepvgae import DeepVGAE
 
-logging.basicConfig(filename='gtg.log', encoding='utf-8', level=logging.DEBUG)
-logging.debug('This message should go to the log file')
+
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)    
+logging.basicConfig(filename='app.log', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
+                    datefmt='%m-%d %H:%M', level=logging.DEBUG, filemode='w')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
 model_opt = dict()
@@ -48,10 +56,8 @@ nodelabel_itos[0] = "<unk>"
 nodelabel_itos[1] = "<pad>"
 
 
-#bpe_data_sent = dict()
-#bpe_data_node = dict()
-
-
+# bpe_data_sent = dict()
+# bpe_data_node = dict()
 # bpe_data_sent[fileprefix] = bpe_tokens
 # bpe_data_node[fileprefix] = node_bpe_tokens
 
@@ -83,7 +89,7 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
             graph = amr.graph
             nodes = dict()
             edges = []
-
+            
             node_ids = []; node_ids_local = []; snttoken_ids = [] # with these ids we'll able to forward the embeddings
             i = 0
             for (s,r,t) in graph._triples:
@@ -92,30 +98,11 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
                     i+=1
 
             fileprefix = amr.id.split(" ::")[0]
-            #print(len(bpe_data_sent))
+
             if fileprefix not in bpe_data_sent or fileprefix not in bpe_data_node:
                 continue
             bpe_tokens =  bpe_data_sent[fileprefix]
             node_bpe_tokens = bpe_data_node[fileprefix] 
-
-
-            # filename = fileprefix+'sent.tok.bpe'
-            # filename2 = fileprefix+'node.tok.bpe'
-
-            # if not os.path.isfile('/kuacc/users/mugekural/workfolder/dev/git/gtg-vae/src/sent-toks-bpes/'+filename) or not os.path.isfile('/kuacc/users/mugekural/workfolder/dev/git/gtg-vae/src/node-toks-bpes/'+filename2):
-            #      print ("File doesnot exist")
-            #      continue
-            # # else:
-            # #     print ("File not exist")
-            # #     f2 = open(fileprefix+'sent.tok', 'w')
-            # #     f2.write(' '.join([str(elem) for elem in src_tokens]))
-            # #     f2.close()
-            # #     os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes < '+fileprefix+'sent.tok > '+fileprefix+'sent.tok.bpe')
-            # f3 = open("sent-toks-bpes/"+fileprefix+"sent.tok.bpe", "r")
-            # bpe_sent = f3.readline()
-            # bpe_tokens = bpe_sent.split(" ")
-            # # print("bpe_tokens:", bpe_tokens)
-            # f3.close()
 
             for token in bpe_tokens:
                 snttokenid = src_dict[token]
@@ -132,23 +119,6 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
                     edges.append([s_id, t_id])
                     edges.append([t_id, s_id])
                     ##TODO:For now assuming nondirected AMR graphs; both edge and reverse included
-
-            # f4 = open(fileprefix+'node.tok', 'w')
-            # for node, values in nodes.items():
-            #     nodelabel = values[1]
-            #     f4.write(nodelabel+"\n")
-            # f4.close()
-                
-            #os.system('python3 /kuacc/users/mugekural/workfolder/dev/subword-nmt/subword_nmt/apply_bpe.py -c bpe.codes <'+fileprefix+'node.tok > '+fileprefix+'node.tok.bpe')
-            # f5 = open("node-toks-bpes/"+fileprefix+"node.tok.bpe", "r")
-            # bpe_node = f5.read()
-            # node_bpe_tokens = bpe_node.split("\n")
-            # #print("node_bpe_tokens:", node_bpe_tokens)
-            # f5.close()
-
-            
-            # bpe_data_sent[fileprefix] = bpe_tokens
-            # bpe_data_node[fileprefix] = node_bpe_tokens
 
             for nodetoken in node_bpe_tokens[:-1]: #last one is trivial
                 nodelabel = nodetoken.split(" ")[0]
@@ -194,21 +164,12 @@ def loaddata(params, src_dict, nodeembeddings, maxnode):
         ##end of one AMR
     #end of batch
 
-    # bpe_sent_json = json.dumps(bpe_data_sent)
-    # f = open("sent_bpes.json","w")
-    # f.write(bpe_sent_json)
-    # f.close()
-
-    # bpe_node_json = json.dumps(bpe_data_node)
-    # f = open("node_bpes.json","w")
-    # f.write(bpe_node_json)
-    # f.close()
-
     return data_list #, nodelabel_stoi, nodelabel_itos
 
 
 def train(train_loader, test_loader, model, epochs, src_dict, node_dict):
 
+  
     # Pad snttoken ids in batch...(looking for a better way)
     batched_snttokens_ids_padded = []
     for data in train_loader:
@@ -220,45 +181,67 @@ def train(train_loader, test_loader, model, epochs, src_dict, node_dict):
         dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
         batched_snttokens_ids_padded.append(dec_seq)
         
-    # opt = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-    opt = optim.Adam(model.parameters(), lr=0.001)
-    
+    opt = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    # opt = optim.Adam(model.parameters(), lr=0.001)
+
+    logging.info("trnsize: {}, testsize: {}".format(len(train_loader.dataset), len(test_loader.dataset))) 
     for epoch in range(epochs):
-        print("epoch ", epoch, " ...")
+       
         total_loss = 0
         model.train()
 
-        correct_nodes = 0; roc_auc_score_tot = 0; average_precision_score_tot = 0; maxnode = 0
+        correct_nodes = 0; roc_auc_score_tot = 0; avg_precision_score_tot = 0; maxnode = 0
+        kl_loss_tot = 0; nodelabel_loss_tot = 0; pos_loss_tot = 0; neg_loss_tot = 0; mse_loss_tot = 0
+
         for step, data in enumerate(train_loader):
             opt.zero_grad()
             
-            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device),batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
             nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
             maxnode = nodetoken_ids.size(1)
-            
-            # Encode graph and text
-            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss, roc_auc_score, average_precision_score  = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
 
-            correct_nodes += correct_predicted_node_tokens.item()
-            roc_auc_score_tot += roc_auc_score.item() * data.num_graphs
-            average_precision_score_tot += average_precision_score.item() * data.num_graphs
-            
-            loss = graph_reconstruction_loss + mse_loss
+            x = x / x.sum(1, keepdim=True).clamp(min=1) # Normalize input node features
+
+            # Encode graph and text
+            kl_loss, pos_loss, neg_loss, roc_auc_score, avg_precision_score  = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+            loss = kl_loss + pos_loss + neg_loss
             loss.backward()
             opt.step()
             total_loss += loss.item() * data.num_graphs          
-        
-        total_loss /= len(train_loader.dataset)
-        correct_nodes /= len(train_loader.dataset)
-        roc_auc_score_tot /= len(train_loader.dataset)
-        average_precision_score_tot /= len(train_loader.dataset)
-        node_label_acc = correct_nodes / maxnode 
-        print("Trainsize: {} Epoch {} - Loss: {} ROC_AUC: {} Precision: {}, Node label accuracy: {}".format(len(train_loader.dataset), epoch, total_loss, roc_auc_score_tot, average_precision_score_tot, node_label_acc))
 
-                   
-        if epoch % 2 == 0:
-            test_loss = test(test_loader, model, src_dict, node_dict, epoch)
+            # Track other losses and metrics...
+            kl_loss_tot  += kl_loss.item() * data.num_graphs
+            # nodelabel_loss_tot += nodelabel_loss.item() * data.num_graphs 
+            pos_loss_tot += pos_loss.item() * data.num_graphs
+            neg_loss_tot += neg_loss.item() * data.num_graphs
+            # mse_loss_tot += mse_loss.item() * data.num_graphs
+            # correct_nodes += correct_predicted_node_tokens.item()
+            roc_auc_score_tot += roc_auc_score.item() * data.num_graphs
+            avg_precision_score_tot += avg_precision_score.item() * data.num_graphs
+
+
             
+        total_loss /= len(train_loader.dataset)
+        kl_loss_tot    /= len(train_loader.dataset)
+        # nodelabel_loss_tot /= len(train_loader.dataset)
+        pos_loss_tot /= len(train_loader.dataset)
+        neg_loss_tot /= len(train_loader.dataset)
+        # mse_loss_tot /= len(train_loader.dataset)
+        
+        # correct_nodes /= len(train_loader.dataset)
+        roc_auc_score_tot /= len(train_loader.dataset)
+        avg_precision_score_tot /= len(train_loader.dataset)
+        # node_label_acc = correct_nodes / maxnode
+        logging.info("---\nTrain:")
+        # print("Epoch {} - Total Loss: {} KL Loss: {} Pos Loss: {} Neg Loss: {} ".format(epoch, total_loss, kl_loss_tot, pos_loss_tot, neg_loss_tot))
+        logging.info("Roc_auc: {}, Avg_precision: {}".format(roc_auc_score_tot, avg_precision_score_tot))
+
+        
+        logging.info("Epoch %d - Total Loss: %f KL Loss: %f Pos Loss: %f Neg Loss: %f", epoch, total_loss, kl_loss_tot, pos_loss_tot, neg_loss_tot)
+        
+        if epoch % 5 == 0:
+            test_loss = test(test_loader, model, src_dict, node_dict, epoch)
+
         
 
         
@@ -275,31 +258,50 @@ def test(loader, model, src_dict, node_dict, epoch):
         batched_snttokens_ids_padded.append(dec_seq)
         
     model.eval()
-    total_loss = 0;  correct_nodes = 0; roc_auc_score_tot = 0; average_precision_score_tot = 0
+    total_loss = 0;  correct_nodes = 0; roc_auc_score_tot = 0; avg_precision_score_tot = 0
+    kl_loss_tot = 0; nodelabel_loss_tot = 0; pos_loss_tot = 0; neg_loss_tot = 0; mse_loss_tot = 0
+
     for (step, data) in enumerate(loader):
         with torch.no_grad():
             
-            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+            x, edge_index, batch, dec_seq, nodetoken_ids = data.x.to(device), data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device),data.__getitem__("nodetoken_ids")
             nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
             maxnode = nodetoken_ids.size(1)
-        
-            # Encode graph and text
-            graph_reconstruction_loss,  correct_predicted_node_tokens, mse_loss, roc_auc_score, average_precision_score = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+            
+            x = x / x.sum(1, keepdim=True).clamp(min=1) # Normalize input node features
 
-            correct_nodes += correct_predicted_node_tokens.item()
+            # Encode graph and text
+            kl_loss, pos_loss, neg_loss, roc_auc_score, avg_precision_score  = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict, node_dict)
+            loss = kl_loss + pos_loss + neg_loss                       
+            total_loss += loss.item() * data.num_graphs
+            
+            # Track other losses and metrics...
+            kl_loss_tot  += kl_loss.item() * data.num_graphs
+            #nodelabel_loss_tot += nodelabel_loss.item() * data.num_graphs 
+            pos_loss_tot += pos_loss.item() * data.num_graphs
+            neg_loss_tot += neg_loss.item() * data.num_graphs
+            #mse_loss_tot += mse_loss.item() * data.num_graphs
+            #correct_nodes += correct_predicted_node_tokens.item()
             roc_auc_score_tot += roc_auc_score.item() * data.num_graphs
-            average_precision_score_tot += average_precision_score.item() * data.num_graphs                       
-            loss = graph_reconstruction_loss + mse_loss                       
-            total_loss += loss.item() * data.num_graphs          
-      
+            avg_precision_score_tot += avg_precision_score.item() * data.num_graphs                       
+
+    
     total_loss /= len(loader.dataset)
+    kl_loss_tot    /= len(loader.dataset)
+    nodelabel_loss_tot /= len(loader.dataset)
+    pos_loss_tot /= len(loader.dataset)
+    neg_loss_tot /= len(loader.dataset)
+    mse_loss_tot /= len(loader.dataset)
+        
     correct_nodes /= len(loader.dataset)
     roc_auc_score_tot /= len(loader.dataset)
-    average_precision_score_tot /= len(loader.dataset)
+    avg_precision_score_tot /= len(loader.dataset)
     node_label_acc = correct_nodes / maxnode 
-    print("Testsize: {} Epoch {} - Loss: {} ROC_AUC: {} Precision: {}, Node label accuracy: {}".format(len(loader.dataset), epoch, total_loss, roc_auc_score_tot, average_precision_score_tot, node_label_acc))
 
-    return total_loss
+    print("\nTest:")
+    print("Epoch {} - Total Loss: {} KL Loss: {} Pos Loss: {} Neg Loss: {}".format(epoch, total_loss, kl_loss_tot, pos_loss_tot, neg_loss_tot))
+    print("Roc_auc: {}, Avg_precision: {}".format(roc_auc_score_tot, avg_precision_score_tot))
+
 
         
 if __name__ == "__main__":
@@ -313,17 +315,18 @@ if __name__ == "__main__":
     parser.add_argument('params', help='Parameters YAML file.')
     args = parser.parse_args()
     params = Params.from_file(args.params)
-    nmax = 15
-    batch_size = 128
+    nmax = 10
+    batch_size = 16
     # data_list, nodelabel_stoi, nodelabel_itos = loaddata(params, src_dict, nodeembeddings, nmax)
     data_list  = loaddata(params, src_dict, nodeembeddings, nmax)
 
-    train_loader = DataLoader(data_list[:10000], batch_size=batch_size)
-    test_loader = DataLoader(data_list[10000:11500], batch_size=batch_size)
-    epochs = 1000
+    train_loader = DataLoader(data_list[:1000], batch_size=batch_size)
+    test_loader = DataLoader(data_list[1000:1500], batch_size=batch_size)
+    epochs = 100
     
     # Build model...
-    input_dim = 512; output_dim = 512;  edgeclass_num = 15; nodeclass_num = 38926 #len(nodelabel_itos)
-    model = GTG(input_dim, output_dim, nmax, edgeclass_num, nodeclass_num, text_transformer).to(device) #text_transformer
+    input_dim = 512; output_dim = 16; nodeclass_num = 38926
+    model = GTG(input_dim, output_dim, nmax, nodeclass_num).to(device) #, text_transformer).to(device) #text_transformer
+    # model = DeepVGAE().to(device)
     train(train_loader, test_loader, model, epochs, src_dict, nodelabel_itos)
  
