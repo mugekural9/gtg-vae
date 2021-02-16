@@ -4,46 +4,40 @@ import re
 
 from torch.nn.init import xavier_uniform
 from transformer_decoder import TransformerDecoder
+from transformer_encoder import TransformerEncoder
 from embeddings import Embeddings
 from dataset import load_fields_from_vocab, save_fields_to_vocab
  
 from utils.misc import use_gpu
 import utils.constants as Constants
+import pdb
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class JointModel(nn.Module):
-  def __init__(self, decoder):
+  def __init__(self, encoder):
     super(JointModel, self).__init__()                                                                                               
-    #self.encoder = encoder                                                                                                           
-    self.decoder = decoder
+    self.encoder = encoder                                                                                                           
+    # self.decoder = decoder
     
-  def forward(self, src, tgt, lengths,
-              task_type):                                                                                   
-    tgt = tgt[:-1]  # exclude last target from inputs
-    
-    # _, memory_bank, lengths = self.encoder(src, lengths)
-    
-    self.decoder.init_state(src, memory_bank)                                                                                        
-    dec_out, attns = self.decoder(tgt)                                                                                               
-    return dec_out, attns    
+  def forward(self, src, tgt, lengths):                                                                                   
+    # tgt = tgt[:-1]  # exclude last target from inputs
+    _, memory_bank, lengths = self.encoder(src, lengths)
+    pdb.set_trace()
+    # self.decoder.init_state(src, memory_bank)                                                                                        
+    # dec_out, attns = self.decoder(tgt)                                                                                               
+    return memory_bank # dec_out, attns    
 
 
 def load_test_model(opt): 
-  print("load test model")
   model_path = opt["model_path"]
-  print("this is model_path")
-
-  print("model_path", model_path)
+  print("loading pretrained transformer from...", model_path)
   checkpoint = torch.load(model_path,
                           map_location=lambda storage,
                           loc:storage)
 
-
-  print("Here is checkpoint")
-  
   fields = load_fields_from_vocab(checkpoint['vocab'])                                                                               
   model_opt = checkpoint['opt']
-
   model = build_base_model(opt, fields, use_gpu(opt), checkpoint)
 
   #model.eval()                                                                                                                       
@@ -61,9 +55,9 @@ def build_embeddings(opt, word_dict, for_encoder=True):
       for_encoder(bool): build Embeddings for encoder or decoder?                                                                    
   """                                                                                                                                
   if for_encoder:                                                                                                                    
-    embedding_dim = opt["src_word_vec_size"]                                                                                            
+    embedding_dim = opt["word_emb_size"]                                                                                            
   else:                                                                                                                              
-    embedding_dim = opt["tgt_word_vec_size"]                                                                                            
+    embedding_dim = opt["word_emb_size"]                                                                                            
   word_padding_idx = word_dict.stoi[Constants.PAD_WORD]                                                                              
   num_word_embeddings = len(word_dict)                                                                                               
   return Embeddings(word_vec_size=embedding_dim,                                                                                     
@@ -71,8 +65,18 @@ def build_embeddings(opt, word_dict, for_encoder=True):
                     dropout=opt["dropout"],                                                                                             
                     word_padding_idx=word_padding_idx,                                                                               
                     word_vocab_size=num_word_embeddings,                                                                             
-                    sparse=opt["optim"] == "sparseadam")     
+                    sparse=False) #opt["optim"] == "sparseadam")     
 
+def build_encoder(opt, embeddings):
+  """
+  Various encoder dispatcher function.
+  Args:
+      opt: the option in current environment.
+      embeddings (Embeddings): vocab embeddings for this encoder.
+  """
+  return TransformerEncoder(opt["enc_layers"], opt["d_model"],
+                            opt["heads"], opt["transformer_ff"],
+                            opt["dropout"], embeddings)
 
 def build_decoder(opt, embeddings):                                                                                                  
   """                                                                                                                                
@@ -81,7 +85,7 @@ def build_decoder(opt, embeddings):
       opt: the option in current environment.                                                                                        
       embeddings (Embeddings): vocab embeddings for this decoder.                                                                    
   """                                                                                                                                
-  return TransformerDecoder(opt["dec_layers"], opt["dec_rnn_size"],                                                                        
+  return TransformerDecoder(opt["dec_layers"], opt["d_model"],                                                                        
                      opt["heads"], opt["transformer_ff"],                                                                                  
                      opt["dropout"], embeddings)    
 
@@ -101,42 +105,37 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
 
   # Build encoder.                                                                                                                   
   src_dict = fields["src"].vocab
-  
-  #print(src_dict.stoi)
   src_embeddings = build_embeddings(model_opt, src_dict)                                                                             
-  #encoder = build_encoder(model_opt, src_embeddings)
-  print("src_embeddings:", src_embeddings.word_lut)
+  encoder = build_encoder(model_opt, src_embeddings)
+  
   
   # Build decoder.                                                                                                                   
-  tgt_dict = fields["tgt"].vocab                                                                                                     
-  tgt_embeddings = build_embeddings(model_opt, tgt_dict,                                                                             
-                                    for_encoder=False)                                                                               
-  # Share the embedding matrix - preprocess with share_vocab required.                                                               
-  if model_opt["share_embeddings"]:                                                                                                     
-    # src/tgt vocab should be the same if `-share_vocab` is specified.                                                               
-    if src_dict != tgt_dict:                                                                                                         
-      raise AssertionError('The `-share_vocab` should be set during '                                                                
-                           'preprocess if you use share_embeddings!')                                                                
-    tgt_embeddings.word_lut.weight = src_embeddings.word_lut.weight                                                                  
+  # tgt_dict = fields["tgt"].vocab                                                                                                     
+  # tgt_embeddings = build_embeddings(model_opt, tgt_dict,                                                                             
+  #                                   for_encoder=False)                                                                               
 
-  decoder = build_decoder(model_opt, tgt_embeddings)                                                                                 
+  # # Share the embedding matrix - preprocess with share_vocab required.                                                               
+  # if model_opt["share_embeddings"]:                                                                                                     
+  #   # src/tgt vocab should be the same if `-share_vocab` is specified.                                                               
+  #   if src_dict != tgt_dict:                                                                                                         
+  #     raise AssertionError('The `-share_vocab` should be set during '                                                                
+  #                          'preprocess if you use share_embeddings!')                                                                
+  #   tgt_embeddings.word_lut.weight = src_embeddings.word_lut.weight                                                                  
 
-  # Build NMTModel(= encoder + decoder).                                                                                             
-  device = torch.device("cuda" if gpu else "cpu")
-  model = JointModel(decoder)                                                                                               
+  # decoder = build_decoder(model_opt, tgt_embeddings)                                                                                 
+  # Build partial NMTModel(only decoder).                                                                                             
+  model = JointModel(encoder) # decoder                                                                                               
 
   # Build Generator.                                                                                                                 
-  gen_func = nn.LogSoftmax(dim=-1)                                                                                                   
-  generator = nn.Sequential(                                                                                                         
-    nn.Linear(model_opt["dec_rnn_size"], len(fields["tgt"].vocab), bias=False),                                                         
-    gen_func                                                                                                                         
-  )                                                                                                                                  
-
-  if model_opt["share_decoder_embeddings"]:                                                                                             
-    generator[0].weight = decoder.embeddings.word_lut.weight                                                                         
-  # Load the model states from checkpoint or initialize them.                                                                        
-
+  # gen_func = nn.LogSoftmax(dim=-1)                                                                                                   
+  # generator = nn.Sequential(                                                                                                         
+  #  nn.Linear(model_opt["d_model"], len(fields["tgt"].vocab), bias=False),                                                         
+  #  gen_func                                                                                                                         
+  # )                                                                                                                                  
+  # if model_opt["share_decoder_embeddings"]:                                                                                             
+  #  generator[0].weight = decoder.embeddings.word_lut.weight
   
+  # Load the model states from checkpoint or initialize them.                                                                        
   if checkpoint is not None:                                                                                                         
     # This preserves backward-compat for models using customed layernorm                                                             
     def fix_key(s):                                                                                                                  
@@ -149,8 +148,7 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
     checkpoint['model'] = {fix_key(k): v for (k, v) in checkpoint['model'].items()}                                                                      
     # end of patch for backward compatibility                                                                                        
     model.load_state_dict(checkpoint['model'], strict=False)                                                                         
-    generator.load_state_dict(checkpoint['generator'], strict=False)
-    
+    # generator.load_state_dict(checkpoint['generator'], strict=False)
   else:                                                                                                                              
     if model_opt["param_init"] != 0.0:
       for p in model.parameters():                                                                                                   
@@ -162,7 +160,6 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
         if p.dim() > 1:                                                                                                              
           xavier_uniform_(p)                                                                                                         
       for p in generator.parameters():                                                                                               
-
         if p.dim() > 1:                                                                                                              
           xavier_uniform_(p)                                                                                                         
     if hasattr(model.encoder, 'embeddings'):                                                                                         

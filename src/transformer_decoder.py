@@ -10,7 +10,8 @@ from sublayer import PositionwiseFeedForward
 import sublayer as sublayer                                                                                                                                     
 MAX_SIZE = 5000                                                                                                                      
                                                                                                                                      
-                                                                                                                                     
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 class TransformerDecoderLayer(nn.Module):                                                                                            
   def __init__(self, d_model, heads, d_ff, dropout):                                                                                 
     super(TransformerDecoderLayer, self).__init__()                                                                                  
@@ -139,8 +140,8 @@ class TransformerDecoder(nn.Module):
     src_memory_bank = memory_bank.transpose(0, 1).contiguous()                                                                       
                                                                                                                                      
     pad_idx = self.embeddings.word_padding_idx                                                                                       
-    src_pad_mask = src_words.data.eq(pad_idx).unsqueeze(1).to("cuda") #[:,:,:1]  #[B, 1, T_src] we forced it [1,1,1]                                                         
-    tgt_pad_mask = tgt_words.data.eq(pad_idx).unsqueeze(1).to("cuda")  # [B, 1, T_tgt]                                                          
+    src_pad_mask = src_words.data.eq(pad_idx).unsqueeze(1).to(device) #[:,:,:1]  #[B, 1, T_src] we forced it [1,1,1]                                                         
+    tgt_pad_mask = tgt_words.data.eq(pad_idx).unsqueeze(1).to(device)  # [B, 1, T_tgt]                                                          
                                                                                                                                      
     for i in range(self.num_layers):                                                                                                 
       output, attn = self.transformer_layers[i](                                                                                     
