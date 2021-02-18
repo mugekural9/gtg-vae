@@ -12,23 +12,37 @@ from utils.misc import use_gpu
 import utils.constants as Constants
 import pdb
 
+from torch.nn import Linear
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class JointModel(nn.Module):
-  def __init__(self, encoder):
+  def __init__(self, encoder, hidden_dim):
     super(JointModel, self).__init__()                                                                                               
-    self.encoder = encoder                                                                                                           
+    self.encoder   = encoder                                                                                                           
+    self.mu_linear = Linear(hidden_dim, hidden_dim)
+    self.std_linear= Linear(hidden_dim, hidden_dim)
     # self.decoder = decoder
     
-  def forward(self, src, tgt, lengths):                                                                                   
+  def forward(self, src, tgt=None, lengths=None):                                                                                   
     # tgt = tgt[:-1]  # exclude last target from inputs
     _, memory_bank, lengths = self.encoder(src, lengths)
-    pdb.set_trace()
+    
     # self.decoder.init_state(src, memory_bank)                                                                                        
     # dec_out, attns = self.decoder(tgt)                                                                                               
-    return memory_bank # dec_out, attns    
+    memory_mu = self.mu_linear(memory_bank)
+    memory_std = self.std_linear(memory_bank)
+    z = self.reparametrize(memory_mu, memory_std)
+    return z #memory_bank # dec_out, attns    
 
 
+  def reparametrize(self, mu, logstd):
+    if self.training:
+      return mu + torch.randn_like(logstd) * torch.exp(logstd)
+    else:
+      return mu
+
+  
 def load_test_model(opt): 
   model_path = opt["model_path"]
   print("loading pretrained transformer from...", model_path)
@@ -124,7 +138,7 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
 
   # decoder = build_decoder(model_opt, tgt_embeddings)                                                                                 
   # Build partial NMTModel(only decoder).                                                                                             
-  model = JointModel(encoder) # decoder                                                                                               
+  model = JointModel(encoder, model_opt["d_model"]) # decoder                                                                                               
 
   # Build Generator.                                                                                                                 
   # gen_func = nn.LogSoftmax(dim=-1)                                                                                                   
@@ -175,3 +189,5 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
   # model.generator = generator                                                                                                        
   model.to(device)                                                                                                                  
   return model          
+
+

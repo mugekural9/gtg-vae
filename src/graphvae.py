@@ -11,6 +11,7 @@ import pdb
 MAX_LOGSTD = 10
 EPS = 1e-15
 
+
 class GraphVAE(torch.nn.Module):
     """
     Args:
@@ -22,12 +23,14 @@ class GraphVAE(torch.nn.Module):
             (default: :obj:`None`)
     """
     
-    def __init__(self, input_dim, hidden_dim, nmax, nodeclass_num):
+    def __init__(self, input_dim, hidden_dim, nmax, phase):
        super(GraphVAE, self).__init__()
-       self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
+       self.phase = phase
+       if self.phase==1:
+           self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
+       self.decoder = VGAE_decoder(hidden_dim, nmax)
        self.inner_product_decoder = InnerProductDecoder() 
-       self.decoder = VGAE_decoder(hidden_dim, nmax,  nodeclass_num)
-   
+    
     
     def reparametrize(self, mu, logstd):
         if self.training:
@@ -75,11 +78,11 @@ class GraphVAE(torch.nn.Module):
         """
         pos_edge_index: (2, num_of_edges)
         f_hat: (B, maxnode, nodelabelsize)
-        feat_hat: (B, maxnode, feature_dim)
+        feat_hat: (B*maxnode, feature_dim)
         x: (maxnode, nodefeatures)
         nodetoken_ids: (B, maxnode)
         """
-        # batch_size = f_hat.size(0)
+        B, maxnode = nodetoken_ids.size()
         # maxnode = f_hat.size(1)
 
         # F_hat (Nodelabel prediction) loss
@@ -92,10 +95,12 @@ class GraphVAE(torch.nn.Module):
         # nodelabel_loss = -torch.log(nodelabel_probs + 1e-15).mean()
 
         # Kl loss
-        kl_loss = 1 / x.size(0) * self.kl_loss()
+        if self.phase == 1:
+            kl_loss = 1 / x.size(0) * self.kl_loss()
+        elif self.phase == 2:
+            kl_loss =  torch.tensor(0)
     
-        # Adjacency matrix loss
-        feat_hat = feat_hat.view(x.size(0), -1) # (numnodes(maxnode*B), Hdim)         
+        # Adjacency matrix loss                 
         pos_loss = -torch.log(self.inner_product_decoder(feat_hat, pos_edge_index, sigmoid=True) + EPS).mean()
         # Do not include self-loops in negative samples
         pos_edge_index, _ = remove_self_loops(pos_edge_index)

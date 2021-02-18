@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
+from torch.nn import Dropout
 
 class VGAE_encoder(torch.nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -12,6 +13,10 @@ class VGAE_encoder(torch.nn.Module):
 
     def forward(self, x, edge_index):
         x = F.relu(self.conv1(x, edge_index))
+        d = Dropout(p=0.33)
+        x = d(x)
+        
+
         x_mu = self.conv2_mu(x,edge_index)
         x_sig = self.conv2_sig(x,edge_index)
         return x_mu,x_sig

@@ -20,6 +20,12 @@ import torch.optim as optim
 import logging
 import pdb
 
+from torch.utils.tensorboard import SummaryWriter
+import time
+timestr = time.strftime("%Y%m%d-%H%M%S")
+writer = SummaryWriter()
+
+
 # Logging...
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 def setup_logger(name, log_file, level=logging.INFO):
@@ -31,12 +37,12 @@ def setup_logger(name, log_file, level=logging.INFO):
     logger.addHandler(handler)
     return logger
 
-train_logger = setup_logger('train_logger', 'train.log')
-test_logger = setup_logger('test_logger', 'test.log')
+train_logger = setup_logger('train_logger', timestr+'_train.log')
+test_logger = setup_logger('test_logger', timestr+'_test.log')
 # general logger
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)    
-logging.basicConfig(filename='app.log', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
+logging.basicConfig(filename=timestr+'_app.log', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
                     datefmt='%m-%d %H:%M', level=logging.DEBUG, filemode='w')
 
 # Config for text transformer...
@@ -45,7 +51,7 @@ model_opt = dict()
 model_opt["d_model"] = 512
 model_opt["share_embeddings"] = True
 model_opt["dropout"] = 0.1
-model_opt["model_path"] = "/Users/mugekural/dev/git/gtg-vae/src/ptm_mt_en2deB_sem_enM.pt"
+model_opt["model_path"] = "/kuacc/users/mugekural/workfolder/dev/git/gtg-vae/src/ptm_mt_en2deB_sem_enM.pt"
 model_opt["word_emb_size"] = 512
 model_opt["position_encoding"] = True
 model_opt["heads"] = 8
@@ -160,11 +166,10 @@ def train(train_loader, test_loader, model, epochs, src_dict):
         
     #opt = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     opt = optim.Adam(model.parameters(), lr=0.001)
-    model.train()
     
     for epoch in range(epochs):
-               
-        losses_batch_tot  = dict.fromkeys(["loss", "kl_loss", "pos_loss", "neg_loss", "mse_loss"], 0)
+        model.train()
+        losses_batch_tot  = dict.fromkeys(["loss", "kl_loss", "pos_loss", "neg_loss", "txt_kl_loss"], 0)
         metrics_batch_tot = dict.fromkeys(["roc_auc_score", "avg_precision_score"], 0)
         
         for step, data in enumerate(train_loader):
@@ -179,7 +184,7 @@ def train(train_loader, test_loader, model, epochs, src_dict):
             losses, metrics  = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict)
             losses["loss"].backward()
             opt.step()
-                        
+            
             # Track other losses and metrics...
             for k,v in losses.items():
                 losses_batch_tot[k] += v.item() * data.num_graphs 
@@ -191,13 +196,21 @@ def train(train_loader, test_loader, model, epochs, src_dict):
         train_logger.info("Epoch %d", epoch)
         for l,v in losses_batch_tot.items():
             train_logger.info("{} : {}".format(l, v/len(train_loader.dataset)))
+            writer.add_scalar("Loss/train/"+l, v/len(train_loader.dataset), epoch)
+          
         for m,v in metrics_batch_tot.items():
             train_logger.info("{} : {}".format(m, v/len(train_loader.dataset)))
-     
-        # if epoch % 5 == 0:
-        #    test_loss = test(test_loader, model, src_dict, epoch)
+            writer.add_scalar("Metric/train/"+m, v/len(train_loader.dataset), epoch)
+          
+        if epoch % 1 == 0:
+             test_loss = test(test_loader, model, src_dict, epoch)
 
-                
+    writer.flush()
+    writer.close()
+    
+    torch.save(model.state_dict(), "gtg_01")
+
+    
 def test(loader, model, src_dict, epoch):
     # Pad snttoken ids in batch...(looking for a better way)
     batched_snttokens_ids_padded = []
@@ -210,7 +223,7 @@ def test(loader, model, src_dict, epoch):
         dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
         batched_snttokens_ids_padded.append(dec_seq)
         
-    losses_batch_tot  = dict.fromkeys(["loss", "kl_loss", "pos_loss", "neg_loss", "mse_loss"], 0)
+    losses_batch_tot  = dict.fromkeys(["loss", "kl_loss", "pos_loss", "neg_loss", "txt_kl_loss"], 0)
     metrics_batch_tot = dict.fromkeys(["roc_auc_score", "avg_precision_score"], 0)
 
     model.eval()
@@ -224,21 +237,146 @@ def test(loader, model, src_dict, epoch):
 
             # Encode graph and text
             losses, metrics  = model(x, edge_index, batch, dec_seq, nodetoken_ids, src_dict)
-                        
+                                   
             # Track other losses and metrics...
             for k,v in losses.items():
                 losses_batch_tot[k] += v.item() * data.num_graphs 
+
             for k,v in metrics.items():
                 metrics_batch_tot[k] += v.item() * data.num_graphs 
             
     test_logger.info("---\nTest:")    
     test_logger.info("Epoch %d", epoch)
     for l,v in losses_batch_tot.items():
-        test_logger.info("{} : {}".format(l, v/len(test_loader.dataset)))
+        test_logger.info("{} : {}".format(l, v/len(loader.dataset)))
+        writer.add_scalar("Loss/test/"+l, v/len(loader.dataset), epoch)
+
     for m,v in metrics_batch_tot.items():
-        test_logger.info("{} : {}".format(m, v/len(test_loader.dataset)))
-     
+        test_logger.info("{} : {}".format(m, v/len(loader.dataset)))
+        writer.add_scalar("Metric/test/"+m, v/len(loader.dataset), epoch)
+
+
+
+
+def train_phase_2(train_loader, test_loader, model, epochs, src_dict):
+
+    logging.info("Training Phase 2...trnsize: {}, testsize: {}, num_epochs: {}".format(len(train_loader.dataset), len(test_loader.dataset), epochs)) 
+
+    # Pad snttoken ids in batch...(looking for a better way)
+    batched_snttokens_ids_padded = []
+    for data in train_loader:
+        dec_seq = data.__getitem__("snttoken_ids")
+        max_seq_len = max([len(i) for i in dec_seq])
+        torch_dec_seq=[]
+        for seq in dec_seq:
+            torch_dec_seq.append(torch.tensor(seq, dtype=torch.long))
+        dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
+        batched_snttokens_ids_padded.append(dec_seq)
+        
+    # opt = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    # opt = optim.Adam(model.parameters(), lr=0.001)
+    
+    for epoch in range(epochs):
+        # model.train()
+        # losses_batch_tot  = dict.fromkeys(["loss", "kl_loss", "pos_loss", "neg_loss", "txt_kl_loss"], 0)
+        # metrics_batch_tot = dict.fromkeys(["roc_auc_score", "avg_precision_score"], 0)
+        
+        # for step, data in enumerate(train_loader):
+        #     opt.zero_grad()
             
+        #     edge_index, batch, dec_seq, nodetoken_ids = data.edge_index.to(device), data.batch.to(device),batched_snttokens_ids_padded[step].to(device), data.__getitem__("nodetoken_ids")
+        #     nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
+        #     batchsize, maxnode = nodetoken_ids.size()    
+            
+        #     # Encode graph and text
+        #     losses, metrics  = model(None, edge_index, batch, dec_seq, nodetoken_ids, src_dict)
+        #     losses["loss"].backward()
+        #     opt.step()
+            
+        #     # Track other losses and metrics...
+        #     for k,v in losses.items():
+        #         losses_batch_tot[k] += v.item() * data.num_graphs 
+        #     for k,v in metrics.items():
+        #         metrics_batch_tot[k] += v.item() * data.num_graphs 
+            
+                
+        # train_logger.info("---\nTrain_Phase2:")    
+        # train_logger.info("Epoch %d", epoch)
+        # for l,v in losses_batch_tot.items():
+        #     train_logger.info("{} : {}".format(l, v/len(train_loader.dataset)))
+        #     writer.add_scalar("Loss/train/"+l, v/len(train_loader.dataset), epoch)
+          
+        # for m,v in metrics_batch_tot.items():
+        #     train_logger.info("{} : {}".format(m, v/len(train_loader.dataset)))
+        #     writer.add_scalar("Metric/train/"+m, v/len(train_loader.dataset), epoch)
+          
+        if epoch % 1 == 0:
+            test_loss = test_phase_2(test_loader, model, src_dict, epoch)
+
+    writer.flush()
+    writer.close()
+    
+    #torch.save(model.state_dict(), "gtg")
+
+
+    
+def test_phase_2(loader, model, src_dict, epoch):
+    # Pad snttoken ids in batch...(looking for a better way)
+    batched_snttokens_ids_padded = []
+    for data in loader:
+        dec_seq = data.__getitem__("snttoken_ids")
+        max_seq_len = max([len(i) for i in dec_seq])
+        torch_dec_seq=[]
+        for seq in dec_seq:
+            torch_dec_seq.append(torch.tensor(seq, dtype=torch.long))
+        dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1)
+        batched_snttokens_ids_padded.append(dec_seq)
+        
+    losses_batch_tot  = dict.fromkeys(["loss", "kl_loss", "pos_loss", "neg_loss", "txt_kl_loss"], 0)
+    metrics_batch_tot = dict.fromkeys(["roc_auc_score", "avg_precision_score"], 0)
+
+    model.eval()
+    for (step, data) in enumerate(loader):
+        with torch.no_grad():
+            
+            edge_index, batch, dec_seq, nodetoken_ids = data.edge_index.to(device), data.batch.to(device), batched_snttokens_ids_padded[step].to(device),data.__getitem__("nodetoken_ids")
+            nodetoken_ids = nodetoken_ids.view(dec_seq.size(1), -1) # B, maxnode
+            maxnode = nodetoken_ids.size(1)
+            
+            # Encode graph and text
+            losses, metrics  = model(None, edge_index, batch, dec_seq, nodetoken_ids, src_dict)
+                                   
+            # Track other losses and metrics...
+            for k,v in losses.items():
+                losses_batch_tot[k] += v.item() * data.num_graphs 
+
+            for k,v in metrics.items():
+                metrics_batch_tot[k] += v.item() * data.num_graphs 
+            
+    test_logger.info("---\nTestDAE:")    
+    test_logger.info("Epoch %d", epoch)
+    for l,v in losses_batch_tot.items():
+        test_logger.info("{} : {}".format(l, v/len(loader.dataset)))
+        writer.add_scalar("Loss/test/"+l, v/len(loader.dataset), epoch)
+
+    for m,v in metrics_batch_tot.items():
+        test_logger.info("{} : {}".format(m, v/len(loader.dataset)))
+        writer.add_scalar("Metric/test/"+m, v/len(loader.dataset), epoch)
+    
+
+def load_phase_2_model(path):
+
+    pretrained = GTG(input_dim, output_dim, nmax, text_transformer, 1).to(device)    
+    pretrained.load_state_dict(torch.load(path))
+    pretrained_dict = pretrained.state_dict()
+
+    model = GTG(input_dim, output_dim, nmax, text_transformer, 2).to(device) 
+    model_dict = model.state_dict()
+    
+    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict} # 1. filter out unnecessary keys
+    model_dict.update(pretrained_dict)      # 2. overwrite entries in the existing state dic
+    model.load_state_dict(pretrained_dict)  # 3. load the new state dict
+    return model
     
         
 if __name__ == "__main__":
@@ -248,19 +386,26 @@ if __name__ == "__main__":
     fields = translator.fields
     nodeembeddings = text_transformer.encoder.embeddings
     src_dict = fields["src"].vocab
+
     parser = argparse.ArgumentParser('datareader.py')
     parser.add_argument('params', help='Parameters YAML file.')
     args = parser.parse_args()
     params = Params.from_file(args.params)
-    nmax = 10
-    batch_size = 16
+    nmax = 15
+    batch_size = 64
     data_list  = loaddata(params, src_dict, nodeembeddings, nmax)
-    train_loader = DataLoader(data_list[:1000], batch_size=batch_size)
-    test_loader = DataLoader(data_list[1000:5500], batch_size=batch_size)
-    epochs = 100
-    
+    train_loader = DataLoader(data_list[:20000], batch_size=batch_size)
+    dev_loader = DataLoader(data_list[20000:23500], batch_size=batch_size)
+    test_loader = DataLoader(data_list[23500:], batch_size=batch_size)
+    epochs = 5
+
     # Build model...
-    input_dim = 512; output_dim = 512; nodeclass_num = 38926
-    model = GTG(input_dim, output_dim, nmax, nodeclass_num, text_transformer).to(device)
-    train(train_loader, test_loader, model, epochs, src_dict)
- 
+    input_dim = 512; output_dim = 512; #nodeclass_num = 38926
+    
+    # Phase 1...
+    # model = GTG(input_dim, output_dim, nmax, text_transformer, 1).to(device) #text_transformer
+    # train(train_loader, dev_loader, model, epochs, src_dict)
+
+    # Phase 2...
+    model = load_phase_2_model("gtg_01")
+    train_phase_2(train_loader, test_loader, model, epochs, src_dict)
