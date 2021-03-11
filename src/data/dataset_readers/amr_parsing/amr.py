@@ -271,7 +271,7 @@ class AMRGraph(penman.Graph):
 
             edge_set.add((source, target))
             G.add_edge(source, target, label=relation)
-
+            #G.add_edge(target, source, label=relation) # I ADDED THIS
         self._G = G
 
     def attributes(self, source=None, relation=None, target=None):
@@ -475,21 +475,23 @@ class AMRGraph(penman.Graph):
         node_list = self.get_list_node()
 
         tgt_token = []
+        tgt_vars = []
         visited = defaultdict(int)
 
         for node, relation, parent_node in node_list:
             instance = [attr[1] for attr in node.attributes if attr[0] == "instance"]
             assert len(instance) == 1
             tgt_token.append(str(instance[0]))
-
+            if node.identifier not in tgt_vars:
+                tgt_vars.append(node.identifier)
             if len(node.attributes) > 1 and visited[node] == 0:
                 for attr in node.attributes:
                     if attr[0] != "instance":
                         tgt_token.append(str(attr[1]))
-
+                        #tgt_vars.append(node.identifier) #?
             visited[node] = 1
 
-        return tgt_token
+        return tgt_token, tgt_vars
 
 
 

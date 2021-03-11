@@ -7,7 +7,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def build_translator(opt):
   fields, model = nmt_model.load_test_model(opt)                                                                 
-  model.to(device)
   translator = Translator(model, fields, opt)
   return translator
 

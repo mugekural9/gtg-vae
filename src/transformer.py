@@ -13,15 +13,16 @@ import utils.constants as Constants
 import pdb
 
 from torch.nn import Linear
+from torch.nn.init import xavier_uniform_
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class JointModel(nn.Module):
-  def __init__(self, encoder, hidden_dim):
+  def __init__(self, encoder, hidden_dim, out_dim):
     super(JointModel, self).__init__()                                                                                               
     self.encoder   = encoder                                                                                                           
-    self.mu_linear = Linear(hidden_dim, hidden_dim)
-    self.std_linear= Linear(hidden_dim, hidden_dim)
+    self.mu_linear = Linear(hidden_dim, out_dim)
+    self.std_linear= Linear(hidden_dim, out_dim)
     # self.decoder = decoder
     
   def forward(self, src, tgt=None, lengths=None):                                                                                   
@@ -51,9 +52,9 @@ def load_test_model(opt):
                           loc:storage)
 
   fields = load_fields_from_vocab(checkpoint['vocab'])                                                                               
-  model_opt = checkpoint['opt']
   model = build_base_model(opt, fields, use_gpu(opt), checkpoint)
 
+  #model_opt = checkpoint['opt']
   #model.eval()                                                                                                                       
   #model.generator.eval()                                                                                                             
   return fields, model
@@ -138,7 +139,7 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
 
   # decoder = build_decoder(model_opt, tgt_embeddings)                                                                                 
   # Build partial NMTModel(only decoder).                                                                                             
-  model = JointModel(encoder, model_opt["d_model"]) # decoder                                                                                               
+  model = JointModel(encoder, model_opt["d_model"], model_opt["d_graphz"]) # decoder                                                                                               
 
   # Build Generator.                                                                                                                 
   # gen_func = nn.LogSoftmax(dim=-1)                                                                                                   
@@ -151,6 +152,7 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
   
   # Load the model states from checkpoint or initialize them.                                                                        
   if checkpoint is not None:                                                                                                         
+    print("WEIGHTS ARE FROM S2SPARSER")
     # This preserves backward-compat for models using customed layernorm                                                             
     def fix_key(s):                                                                                                                  
       s = re.sub(r'(.*)\.layer_norm((_\d+)?)\.b_2',                                                                                  
@@ -163,8 +165,9 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
     # end of patch for backward compatibility                                                                                        
     model.load_state_dict(checkpoint['model'], strict=False)                                                                         
     # generator.load_state_dict(checkpoint['generator'], strict=False)
-  else:                                                                                                                              
-    if model_opt["param_init"] != 0.0:
+  else:
+    #breakpoint()
+    if False: #model_opt["param_init"] != 0.0:
       for p in model.parameters():                                                                                                   
         p.data.uniform_(-model_opt["param_init"], model_opt["param_init"])                                                                 
       for p in generator.parameters():                                                                                               
@@ -173,16 +176,16 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
       for p in model.parameters():                                                                                                   
         if p.dim() > 1:                                                                                                              
           xavier_uniform_(p)                                                                                                         
-      for p in generator.parameters():                                                                                               
-        if p.dim() > 1:                                                                                                              
-          xavier_uniform_(p)                                                                                                         
-    if hasattr(model.encoder, 'embeddings'):                                                                                         
-      model.encoder.embeddings.load_pretrained_vectors(                                                                              
-          model_opt.pre_word_vecs_enc, model_opt.fix_word_vecs_enc)                                                                  
+      # for p in generator.parameters():                                                                                               
+      #   if p.dim() > 1:                                                                                                              
+      #     xavier_uniform_(p)                                                                                                         
+    # if hasattr(model.encoder, 'embeddings'):                                                                                         
+    #   model.encoder.embeddings.load_pretrained_vectors(                                                                              
+    #       model_opt.pre_word_vecs_enc, model_opt.fix_word_vecs_enc)                                                                  
 
-    if hasattr(model.decoder, 'embeddings'):                                                                                         
-      model.decoder.embeddings.load_pretrained_vectors(                                                                              
-          model_opt.pre_word_vecs_dec, model_opt.fix_word_vecs_dec)                                                                  
+    # if hasattr(model.decoder, 'embeddings'):                                                                                         
+    #   model.decoder.embeddings.load_pretrained_vectors(                                                                              
+    #       model_opt.pre_word_vecs_dec, model_opt.fix_word_vecs_dec)                                                                  
       #pdb.set_trace()                                                                                                                   
 
   # Add generator to model (this registers it as parameter of model).                                                                

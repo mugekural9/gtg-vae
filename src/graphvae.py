@@ -6,13 +6,14 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 from torch_geometric.nn import global_max_pool
 from vgae_encoder import VGAE_encoder
 from vgae_decoder import VGAE_decoder
-import pdb
-
+import pdb, math
+from maxspantree import mst_graph
 MAX_LOGSTD = 10
 EPS = 1e-15
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
 
 
-class GraphVAE(torch.nn.Module):
+class GraphVAEM(torch.nn.Module):
     """
     Args:
         encoder (Module): The encoder module to compute :math:`\mu` and
@@ -23,15 +24,14 @@ class GraphVAE(torch.nn.Module):
             (default: :obj:`None`)
     """
     
-    def __init__(self, input_dim, hidden_dim, nmax, phase):
-       super(GraphVAE, self).__init__()
+    def __init__(self, input_dim, hidden_dim, nmax, nodelabel_num, phase):
+       super(GraphVAEM, self).__init__()
        self.phase = phase
-       if self.phase==1:
-           self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
-       self.decoder = VGAE_decoder(hidden_dim, nmax)
-       self.inner_product_decoder = InnerProductDecoder() 
+       # if self.phase==1:
+       self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
+       #self.decoder = VGAE_decoder(hidden_dim, nmax, nodelabel_num, phase)
     
-    
+       
     def reparametrize(self, mu, logstd):
         if self.training:
             return mu + torch.randn_like(logstd) * torch.exp(logstd)
@@ -74,45 +74,76 @@ class GraphVAE(torch.nn.Module):
             torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
 
 
-    def recon_loss(self, feat_hat, x, pos_edge_index, batch, nodetoken_ids, src_dict):
+    def recon_loss(self, adj_matrix, nodelabel_scores, x, pos_edge_index, batch, nodetoken_ids, src_dict, phase, gold_edges, neg_edge_index, adj_input):
         """
         pos_edge_index: (2, num_of_edges)
-        f_hat: (B, maxnode, nodelabelsize)
-        feat_hat: (B*maxnode, feature_dim)
+        adj_matrix: (B, maxnode, maxnode)
+        nodelabel_scores: (B, maxnode, nodelabel_num)
         x: (maxnode, nodefeatures)
         nodetoken_ids: (B, maxnode)
         """
         B, maxnode = nodetoken_ids.size()
-        # maxnode = f_hat.size(1)
-
-        # F_hat (Nodelabel prediction) loss
-        # Create indexing matrix for batch: [batch, 1]
-        # batch_index = torch.arange(0, batch_size).view(batch_size, 1)
-        # node_index  = torch.arange(0, maxnode).view(1, maxnode).repeat(batch_size,1)
-        # m =  nn.Softmax(dim=2)
-        # f_hat = m(f_hat)
-        # nodelabel_probs = f_hat[batch_index, node_index, nodetoken_ids.data]
-        # nodelabel_loss = -torch.log(nodelabel_probs + 1e-15).mean()
+        
+        if False: # self.phase == 2:
+            # Nodelabel loss...
+            # Create indexing matrix for batch: [batch, 1]
+            batch_index = torch.arange(0, B).view(B, 1)
+            node_index  = torch.arange(0, maxnode).view(1, maxnode).repeat(B, 1)
+            m =  nn.Softmax(dim=2)
+            _nodelabel_probs = m(nodelabel_scores)
+            nodelabel_probs = _nodelabel_probs[batch_index, node_index, nodetoken_ids.data]
+            nodelabel_loss = -torch.log(nodelabel_probs + 1e-15).mean()
+            predicted_node_tokens = torch.argmax(nodelabel_scores,2) # (B, maxnode)
+            nodelabel_acc = (predicted_node_tokens == nodetoken_ids).sum() / (B*maxnode)
+            
+            if False:
+                # See predictions...
+                for i in range(len(predicted_node_tokens)):
+                    tokens = []; gold_tokens = []
+                    for tok in nodetoken_ids[i]:
+                        tok = tok.item()
+                        if tok < len(src_dict):
+                            gold_tokens.append(src_dict.itos[tok].replace("~", "_"))          
+                    print("\ngold_tokens:", gold_tokens)
+                    for tok in predicted_node_tokens[i]:
+                        tok = tok.item()
+                        if tok < len(src_dict):
+                            tokens.append(src_dict.itos[tok].replace("~", "_"))          
+                    print("tokens:", tokens)
 
         # Kl loss
-        if self.phase == 1:
-            kl_loss = 1 / x.size(0) * self.kl_loss()
-        elif self.phase == 2:
+        if phase == 1:
+            kl_loss =  self.kl_loss() / x.size(0)
+        elif phase == 2:
             kl_loss =  torch.tensor(0)
-    
-        # Adjacency matrix loss                 
-        pos_loss = -torch.log(self.inner_product_decoder(feat_hat, pos_edge_index, sigmoid=True) + EPS).mean()
+
+        # Adjacency matrix loss...                 
+        _src   = torch.remainder(pos_edge_index[0], maxnode)
+        _tgt   = torch.remainder(pos_edge_index[1], maxnode)
+        _batch = torch.floor(pos_edge_index[0] / maxnode)
+        pos_prob = adj_matrix[_batch.detach().cpu().numpy(), _src.detach().cpu().numpy(), _tgt.detach().cpu().numpy()].squeeze(0)
+        pos_loss = -torch.log(pos_prob + EPS).mean()
+
         # Do not include self-loops in negative samples
-        pos_edge_index, _ = remove_self_loops(pos_edge_index)
-        pos_edge_index, _ = add_self_loops(pos_edge_index)
-        neg_edge_index = negative_sampling(pos_edge_index, feat_hat.size(0))
-        neg_loss = -torch.log(1 -self.inner_product_decoder(feat_hat, neg_edge_index, sigmoid=True) + EPS).mean()
-        roc_auc_score, avg_precision_score = self.test(feat_hat, pos_edge_index, neg_edge_index)
-       
-        return kl_loss, pos_loss, neg_loss, roc_auc_score, avg_precision_score
+        _neg_edge_index = negative_sampling(pos_edge_index, num_neg_samples=pos_edge_index.size(1)) 
+        neg_edge_index = torch.cat((_neg_edge_index, neg_edge_index), 1)
+        _src   = torch.remainder(neg_edge_index[0], maxnode)
+        _tgt   = torch.remainder(neg_edge_index[1], maxnode)
+        _batch = torch.floor(neg_edge_index[0] / maxnode)
+        neg_prob = adj_matrix[_batch.detach().cpu().numpy(), _src.detach().cpu().numpy(), _tgt.detach().cpu().numpy()].squeeze(0)
+        neg_loss = -torch.log(1-neg_prob + EPS).mean()
+        
+        
+        edge_recall, edge_precision = self.graph_statistics(adj_matrix, pos_edge_index, gold_edges, adj_input)
+        # roc_auc_score, avg_precision_score = self.test(pos_prob, neg_prob, pos_edge_index, neg_edge_index)
+        roc_auc_score, avg_precision_score = torch.tensor(0), torch.tensor(0)
+        
+        nodelabel_loss, nodelabel_acc = torch.tensor(0), torch.tensor(0)
+     
+        return kl_loss, pos_loss, neg_loss, nodelabel_loss, roc_auc_score, avg_precision_score, nodelabel_acc, edge_recall, edge_precision
 
     
-    def test(self, z, pos_edge_index, neg_edge_index):
+    def test(self, pos_pred, neg_pred, pos_edge_index, neg_edge_index):
         r"""Given latent variables :obj:`z`, positive edges
         :obj:`pos_edge_index` and negative edges :obj:`neg_edge_index`,
         computes area under the ROC curve (AUC) and average precision (AP)
@@ -125,16 +156,45 @@ class GraphVAE(torch.nn.Module):
             neg_edge_index (LongTensor): The negative edges to evaluate
                 against.
         """
-        pos_y = z.new_ones(pos_edge_index.size(1))
-        neg_y = z.new_zeros(neg_edge_index.size(1))
-        y = torch.cat([pos_y, neg_y], dim=0)
-
-        pos_pred = self.inner_product_decoder(z, pos_edge_index, sigmoid=True)
-        neg_pred = self.inner_product_decoder(z, neg_edge_index, sigmoid=True)
-        pred = torch.cat([pos_pred, neg_pred], dim=0)
-
-        y, pred = y.detach().cpu().numpy(), pred.detach().cpu().numpy()
         
+        pos_y = pos_pred.new_ones(pos_edge_index.size(1)) #276
+        neg_y = pos_pred.new_zeros(neg_edge_index.size(1)) #276 
+        y = torch.cat([pos_y, neg_y], dim=0) #552 
+
+        pred = torch.cat([pos_pred, neg_pred], dim=0) #552
+        y, pred = y.detach().cpu().numpy(), pred.detach().cpu().numpy()
+    
         return roc_auc_score(y, pred), average_precision_score(y, pred)
 
+    def graph_statistics(self, adj_matrix, pos_edge_index, gold_edges, adj_input):
+        #print(adj_input)
+        #breakpoint()
+        pred_edges = mst_graph(adj_matrix)
+        count = 0
+        gold_edgelength = 0
+        pred_edgelength = 0
+        
+        for b in pred_edges.keys():
+            if gold_edges is not None:
+                gold_edgelength += len(gold_edges[b])
+            if pred_edges is not None:
+                pred_edgelength += len(pred_edges[b])
+            #print("\npred_edges[b]:", pred_edges[b])
+            #print("gold_edges[b]:", gold_edges[b])
+              
+            for j in pred_edges[b]:
+                if (j[0],j[1]) in gold_edges[b] or (j[1], j[0]) in gold_edges[b]:
+                    count += 1
+             
 
+        
+        if gold_edgelength == 0 or pred_edgelength == 0:
+            return torch.tensor(0), torch.tensor(0) ## check this!
+        edge_recall = torch.tensor(count / gold_edgelength) 
+        edge_precision = torch.tensor(count/ pred_edgelength)
+
+        # print("\ngold_edges:", gold_edges)
+        # print("pred_edges:", pred_edges)
+        # print("edge_recall:", edge_recall)
+        # print("edge_precision:", edge_precision)
+        return edge_recall, edge_precision
