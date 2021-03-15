@@ -127,6 +127,7 @@ def load_fields_from_vocab(vocab):
   """
   Load Field objects from `vocab.pt` file.
   """
+  #breakpoint()
   vocab = dict(vocab)
   fields = get_fields()
   for k, v in vocab.items():

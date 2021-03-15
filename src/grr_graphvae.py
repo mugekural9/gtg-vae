@@ -7,10 +7,14 @@ import torch.nn.functional as F
 import torch.nn.init as init
 from maxspantree import mst_graph
 from graphvae import GraphVAEM
-
+from transformers import BertModel
+from torch.nn import Linear
+from transformers import BertModel, BertConfig
+# Initializing a BERT bert-base-uncased style configuration
+configuration = BertConfig()
 
 class GraphVAE(nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim, max_num_nodes):
+    def __init__(self, input_dim, hidden_dim, latent_dim, max_num_nodes, text_encoder=None, phase=1):
         '''
         Args:
             input_dim: input feature dimension for node.
@@ -22,7 +26,19 @@ class GraphVAE(nn.Module):
         self.graph_vae = GraphVAEM(input_dim, hidden_dim, max_num_nodes, 38926, 1)    
         self.vae = MLP_VAE_plain(hidden_dim, latent_dim, output_dim)
         self.max_num_nodes = max_num_nodes
-        
+        self.phase= phase
+        if phase == 2:
+            # configuration.hidden_size = 64
+            # configuration.num_hidden_layers = 2
+            # configuration.num_attention_heads = 8
+            # configuration.hidden_dropout_prob = 0.2
+            self.text_encoder = BertModel.from_pretrained('bert-base-uncased')  #text_encoder, BertModel(configuration)
+            self.linear_1 = Linear(768, 512)
+            self.linear_2 = Linear(512, 64)
+            self.linear_1.weight.data = init.xavier_uniform(self.linear_1.weight.data, gain=nn.init.calculate_gain('relu'))
+            self.linear_2.weight.data = init.xavier_uniform(self.linear_2.weight.data, gain=nn.init.calculate_gain('relu'))
+
+            
     def recover_adj_lower(self, l):
         # NOTE: Assumes 1 per minibatch
         adj = torch.zeros(self.max_num_nodes, self.max_num_nodes)
@@ -34,29 +50,45 @@ class GraphVAE(nn.Module):
         return lower + torch.transpose(lower, 0, 1) - diag
 
     
-    def forward(self, x, edge_index, batch, adj, gold_edges, report):
+    def forward(self, x, edge_index, batch, adj, gold_edges, report, dec_seq, encoding):
 
-        graph_z = self.graph_vae.encode(batch, x, edge_index)
-        #graph_z = torch.load('tensor.pt')
-       
-        h_decode = self.vae(graph_z) 
-        out = F.sigmoid(h_decode)
-        out_tensor = out.cpu().data
-        #out_tensor = torch.load('out_tensor.pt')
-       
-        B, maxnode, _ = adj.size() #out_tensor.size()
-    
-        #loss_kl = -0.5 * torch.sum(1 + z_lsgms - z_mu.pow(2) - z_lsgms.exp())
-        #loss_kl /= B* self.max_num_nodes * self.max_num_nodes # normalize
-
-        #torch.save(out_tensor, 'out_tensor.pt')
-        #print(out_tensor)
-            
-        loss_kl = self.graph_vae.kl_loss() / x.size(0)
+        graph_loss_kl = torch.tensor(0).float(); graph_txt_loss_kl = torch.tensor(0).float()
         total_loss = 0; total_edge_recall = torch.tensor(0).float(); total_edge_precision = torch.tensor(0).float();
             
-        for b in range(B):
+        # Encode graph...
+        graph_z = self.graph_vae.encode(batch, x, edge_index)
+         
+        if self.phase == 1:
+            z = graph_z
+            graph_loss_kl = self.graph_vae.kl_loss() / x.size(0)
+
+        elif self.phase == 2:
+            # work with transformer_encoder...
+            # Encode text...
+            #breakpoint()
+            src_enc = self.text_encoder(**encoding, return_dict=True)
+            text_z = src_enc.pooler_output
+            text_z = F.relu(self.linear_1(text_z))
+            text_z = self.linear_2(text_z)
+            loss = nn.L1Loss()
+            pdist = nn.PairwiseDistance(p=2)
+            #loss = nn.MSELoss()
+            graph_txt_loss = pdist(text_z, graph_z).mean()
             
+            #criterion = nn.KLDivLoss(reduction='batchmean')
+            #softmax = nn.Softmax(dim=1)
+            #p = torch.log(softmax(text_z))
+            #q = softmax(graph_z)
+            #graph_txt_loss = criterion(p,q)    
+        
+                
+        h_decode = self.vae(text_z) 
+        out = F.sigmoid(h_decode)
+        out_tensor = out.cpu().data       
+        B, maxnode, _ = adj.size() #out_tensor.size()
+
+        # Graph reconstruction...
+        for b in range(B):
             _out_tensor = out_tensor[b,:].unsqueeze(0)
             recon_adj_lower = self.recover_adj_lower(_out_tensor) 
             recon_adj_tensor = self.recover_full_adj_from_lower(recon_adj_lower) # make symmetric
@@ -70,10 +102,13 @@ class GraphVAE(nn.Module):
                 edge_recall, edge_precision = self.graph_statistics(recon_adj_tensor, list(gold_edges[b]), report)
                 total_edge_recall += edge_recall.float()
                 total_edge_precision += edge_precision.float()
-        
-        total_loss /= B
-        total_loss += loss_kl
-    
+
+        if self.phase == 1:
+            total_loss /= B
+            total_loss += graph_loss_kl
+        elif self.phase == 2:
+            total_loss = graph_txt_loss
+            
         return total_loss, total_edge_recall.float(), total_edge_precision.float()
 
     def adj_recon_loss(self, adj_truth, adj_pred):

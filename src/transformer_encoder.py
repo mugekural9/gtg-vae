@@ -58,6 +58,7 @@ class TransformerEncoder(nn.Module):
     out = emb.transpose(0, 1).contiguous()
     words = src.transpose(0, 1)
     padding_idx = self.embeddings.word_padding_idx
+
     mask = words.data.eq(padding_idx).unsqueeze(1)  # [B, 1, T]
     # Run the forward pass of every layer of the tranformer.
     for i in range(self.num_layers):

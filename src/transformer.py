@@ -21,21 +21,25 @@ class JointModel(nn.Module):
   def __init__(self, encoder, hidden_dim, out_dim):
     super(JointModel, self).__init__()                                                                                               
     self.encoder   = encoder                                                                                                           
-    self.mu_linear = Linear(hidden_dim, out_dim)
-    self.std_linear= Linear(hidden_dim, out_dim)
+    #self.mu_linear = Linear(hidden_dim, out_dim)
+    #self.std_linear= Linear(hidden_dim, out_dim)
+    self.linear = Linear(hidden_dim, out_dim)
     # self.decoder = decoder
-    
+    self.dropout = nn.Dropout(0.1)
+
   def forward(self, src, tgt=None, lengths=None):                                                                                   
     # tgt = tgt[:-1]  # exclude last target from inputs
     _, memory_bank, lengths = self.encoder(src, lengths)
+    memory_bank = self.dropout(self.linear(memory_bank))
+    memory_bank = memory_bank.mean(1)
     
+    #breakpoint()
     # self.decoder.init_state(src, memory_bank)                                                                                        
     # dec_out, attns = self.decoder(tgt)                                                                                               
-    memory_mu = self.mu_linear(memory_bank)
-    memory_std = self.std_linear(memory_bank)
-    z = self.reparametrize(memory_mu, memory_std)
-    return z #memory_bank # dec_out, attns    
-
+    #memory_mu = self.mu_linear(memory_bank)
+    #memory_std = self.std_linear(memory_bank)
+    #z = self.reparametrize(memory_mu, memory_std)
+    return memory_bank # dec_out, attns #z
 
   def reparametrize(self, mu, logstd):
     if self.training:
@@ -93,17 +97,6 @@ def build_encoder(opt, embeddings):
                             opt["heads"], opt["transformer_ff"],
                             opt["dropout"], embeddings)
 
-def build_decoder(opt, embeddings):                                                                                                  
-  """                                                                                                                                
-  Various decoder dispatcher function.                                                                                               
-  Args:                                                                                                                              
-      opt: the option in current environment.                                                                                        
-      embeddings (Embeddings): vocab embeddings for this decoder.                                                                    
-  """                                                                                                                                
-  return TransformerDecoder(opt["dec_layers"], opt["d_model"],                                                                        
-                     opt["heads"], opt["transformer_ff"],                                                                                  
-                     opt["dropout"], embeddings)    
-
 
 
 def build_base_model(model_opt, fields, gpu, checkpoint=None):                                                                       
@@ -122,23 +115,6 @@ def build_base_model(model_opt, fields, gpu, checkpoint=None):
   src_dict = fields["src"].vocab
   src_embeddings = build_embeddings(model_opt, src_dict)                                                                             
   encoder = build_encoder(model_opt, src_embeddings)
-  
-  
-  # Build decoder.                                                                                                                   
-  # tgt_dict = fields["tgt"].vocab                                                                                                     
-  # tgt_embeddings = build_embeddings(model_opt, tgt_dict,                                                                             
-  #                                   for_encoder=False)                                                                               
-
-  # # Share the embedding matrix - preprocess with share_vocab required.                                                               
-  # if model_opt["share_embeddings"]:                                                                                                     
-  #   # src/tgt vocab should be the same if `-share_vocab` is specified.                                                               
-  #   if src_dict != tgt_dict:                                                                                                         
-  #     raise AssertionError('The `-share_vocab` should be set during '                                                                
-  #                          'preprocess if you use share_embeddings!')                                                                
-  #   tgt_embeddings.word_lut.weight = src_embeddings.word_lut.weight                                                                  
-
-  # decoder = build_decoder(model_opt, tgt_embeddings)                                                                                 
-  # Build partial NMTModel(only decoder).                                                                                             
   model = JointModel(encoder, model_opt["d_model"], model_opt["d_graphz"]) # decoder                                                                                               
 
   # Build Generator.                                                                                                                 

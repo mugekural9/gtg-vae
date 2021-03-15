@@ -33,6 +33,7 @@ class GraphVAEM(torch.nn.Module):
     
        
     def reparametrize(self, mu, logstd):
+        
         if self.training:
             return mu + torch.randn_like(logstd) * torch.exp(logstd)
         else:
