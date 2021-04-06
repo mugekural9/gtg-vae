@@ -14,67 +14,34 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class GraphVAEM(torch.nn.Module):
-    """
-    Args:
-        encoder (Module): The encoder module to compute :math:`\mu` and
-            :math:`\log\sigma^2`.
-        decoder (Module, optional): The decoder module. If set to :obj:`None`,
-            will default to the
-            :class:`torch_geometric.nn.models.InnerProductDecoder`.
-            (default: :obj:`None`)
-    """
-    
     def __init__(self, input_dim, hidden_dim, nmax, nodelabel_num, phase):
        super(GraphVAEM, self).__init__()
        self.phase = phase
-       # if self.phase==1:
        self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
        #self.decoder = VGAE_decoder(hidden_dim, nmax, nodelabel_num, phase)
     
-       
     def reparametrize(self, mu, logstd):
-        
         if self.training:
             return mu + torch.randn_like(logstd) * torch.exp(logstd)
         else:
             return mu
 
     def encode(self, batch, *args, **kwargs):
-        """"""
         self.__mu__, self.__logstd__ = self.encoder(*args, **kwargs)
         self.__logstd__ = self.__logstd__.clamp(max=MAX_LOGSTD)
-
-        self.__mu__ = global_max_pool(self.__mu__, batch) # (B,Zdim)
-        self.__logstd__ = global_max_pool(self.__logstd__, batch) # (B,Zdim)
-       
-        z = self.reparametrize(self.__mu__, self.__logstd__)
-        return z
+        self.__mu__ = global_max_pool(self.__mu__, batch)          # (B,Zdim)
+        self.__logstd__ = global_max_pool(self.__logstd__, batch)  # (B,Zdim)
+        #z = self.reparametrize(self.__mu__, self.__logstd__)
+        return self.__mu__, self.__logstd__
 
     def decode(self, *args, **kwargs):
         r"""Runs the decoder and computes edge probabilities."""
         return self.decoder(*args, **kwargs)
 
-    
-    def kl_loss(self, mu=None, logstd=None):
-        r"""Computes the KL loss, either for the passed arguments :obj:`mu`
-        and :obj:`logstd`, or based on latent variables from last encoding.
+    def kl_loss(self):
+        return -0.5 * torch.mean(torch.sum(1 + 2 * self.logstd - self.mu**2 - self.logstd.exp()**2, dim=1))
 
-        Args:
-            mu (Tensor, optional): The latent space for :math:`\mu`. If set to
-                :obj:`None`, uses the last computation of :math:`mu`.
-                (default: :obj:`None`)
-            logstd (Tensor, optional): The latent space for
-                :math:`\log\sigma`.  If set to :obj:`None`, uses the last
-                computation of :math:`\log\sigma^2`.(default: :obj:`None`)
-        """
-        
-        mu = self.__mu__ if mu is None else mu
-        logstd = self.__logstd__ if logstd is None else logstd.clamp(
-            max=MAX_LOGSTD)
-        return -0.5 * torch.mean(
-            torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
-
-
+    '''
     def recon_loss(self, adj_matrix, nodelabel_scores, x, pos_edge_index, batch, nodetoken_ids, src_dict, phase, gold_edges, neg_edge_index, adj_input):
         """
         pos_edge_index: (2, num_of_edges)
@@ -134,13 +101,10 @@ class GraphVAEM(torch.nn.Module):
         neg_prob = adj_matrix[_batch.detach().cpu().numpy(), _src.detach().cpu().numpy(), _tgt.detach().cpu().numpy()].squeeze(0)
         neg_loss = -torch.log(1-neg_prob + EPS).mean()
         
-        
         edge_recall, edge_precision = self.graph_statistics(adj_matrix, pos_edge_index, gold_edges, adj_input)
         # roc_auc_score, avg_precision_score = self.test(pos_prob, neg_prob, pos_edge_index, neg_edge_index)
         roc_auc_score, avg_precision_score = torch.tensor(0), torch.tensor(0)
-        
         nodelabel_loss, nodelabel_acc = torch.tensor(0), torch.tensor(0)
-     
         return kl_loss, pos_loss, neg_loss, nodelabel_loss, roc_auc_score, avg_precision_score, nodelabel_acc, edge_recall, edge_precision
 
     
@@ -174,7 +138,6 @@ class GraphVAEM(torch.nn.Module):
         count = 0
         gold_edgelength = 0
         pred_edgelength = 0
-        
         for b in pred_edges.keys():
             if gold_edges is not None:
                 gold_edgelength += len(gold_edges[b])
@@ -182,20 +145,17 @@ class GraphVAEM(torch.nn.Module):
                 pred_edgelength += len(pred_edges[b])
             #print("\npred_edges[b]:", pred_edges[b])
             #print("gold_edges[b]:", gold_edges[b])
-              
             for j in pred_edges[b]:
                 if (j[0],j[1]) in gold_edges[b] or (j[1], j[0]) in gold_edges[b]:
                     count += 1
-             
 
-        
         if gold_edgelength == 0 or pred_edgelength == 0:
             return torch.tensor(0), torch.tensor(0) ## check this!
         edge_recall = torch.tensor(count / gold_edgelength) 
         edge_precision = torch.tensor(count/ pred_edgelength)
-
         # print("\ngold_edges:", gold_edges)
         # print("pred_edges:", pred_edges)
         # print("edge_recall:", edge_recall)
         # print("edge_precision:", edge_precision)
         return edge_recall, edge_precision
+    '''

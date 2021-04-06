@@ -1,4 +1,3 @@
-# import re
 import os
 import argparse
 import yaml
@@ -7,32 +6,27 @@ from utils.tqdm import Tqdm
 from utils.params import Params, remove_pretrained_embedding_params
 from data.dataset_builder import dataset_from_params, iterator_from_params
 from data.vocabulary import Vocabulary
-
 from torch_geometric.datasets import Planetoid
 import torch_geometric.transforms as T
 from torch_geometric.utils import train_test_split_edges
-
 from torch_geometric.data import Data, DataLoader
 from gtg import GTG
 import json
 from translator import build_translator
 import torch.optim as optim
 import logging
-import pdb
 import numpy as np
 import networkx as nx
-
-from grr_graphvae import GraphVAE
+from gtvae import GraphVAE
 from torch.optim.lr_scheduler import MultiStepLR
-
 from torch.utils.tensorboard import SummaryWriter
 import time
+from transformers import BertTokenizer
+from text_vae import DAE
+
+# Logging..
 timestr = time.strftime("%Y%m%d-%H%M%S")
 writer = SummaryWriter()
-
-from transformers import BertTokenizer
-
-# Logging...
 formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 def setup_logger(name, log_file, level=logging.INFO):
     """To setup as many loggers as you want"""
@@ -42,12 +36,9 @@ def setup_logger(name, log_file, level=logging.INFO):
     logger.setLevel(level)
     logger.addHandler(handler)
     return logger
-
 train_logger = setup_logger('train_logger', timestr+'_train.log')
 dev_logger   = setup_logger('dev_logger',   timestr+'_dev.log')
 test_logger  = setup_logger('test_logger',  timestr+'_test.log')
-
-# general logger
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)    
 logging.basicConfig(filename=timestr+'_app.log', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
@@ -257,8 +248,9 @@ def train(train_loader, dev_loader, model, epochs, src_dict, model_name):
     logging.info("Model saved to: {}".format(model_name))
 
     
-def dev(loader, model, src_dict, epoch):
-    epoch_loss = 0; epoch_edge_recall = 0; epoch_edge_precision = 0
+def dev(loader, model, src_dict, epoch, kl_anneal_w):
+    epoch_loss = 0; epoch_graph_recon_loss = 0; epoch_text_recon_loss = 0; epoch_joint_kl_loss = 0; 
+    epoch_edge_recall = 0; epoch_edge_precision = 0; epoch_text_acc = 0; epoch_edge_recall_m = 0; epoch_edge_precision_m = 0
     model.eval()
     for (step, data) in enumerate(loader):
         with torch.no_grad():
@@ -268,31 +260,44 @@ def dev(loader, model, src_dict, epoch):
             for seq in dec_seq:
                 torch_dec_seq.append(torch.tensor(seq, dtype=torch.long))
             dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1).t().to(device)
-            gold_edges = data.__getitem__("gold_edges")
-            adj_input = torch.tensor(data.adj_padded).to(device).float()
-            x, edge_index, batch, nodetoken_ids, gold_edges = data.x.to(device), data.edge_index.to(device), data.batch.to(device), data.__getitem__("nodetoken_ids"), data.__getitem__("gold_edges")
-            text_batch = data.__getitem__("snts")
-            encoding = tokenizer(text_batch, return_tensors='pt', padding=True, truncation=True).to(device)
-            #breakpoint()
-            loss, edge_recall, edge_precision = model(x, edge_index, batch, adj_input, gold_edges, True, dec_seq, encoding) 
-            epoch_loss += loss.item(); epoch_edge_recall += edge_recall; epoch_edge_precision += edge_precision
-    print('DEV Epoch: ', epoch, ', Loss: ', epoch_loss/ len(loader), ', Recall:', epoch_edge_recall/ len(loader.dataset), ', Precision:', epoch_edge_precision/len(loader.dataset))            
-    dev_logger.info("{} : {}".format(epoch, epoch_loss/ len(loader)))
-    dev_logger.info("{} : {}".format(epoch, epoch_edge_recall/ len(loader.dataset)))
-    dev_logger.info("{} : {}".format(epoch, epoch_edge_precision/ len(loader.dataset)))
-
+            x, edge_index, batch, nodetoken_ids, gold_edges, adj_input = data.x.to(device), data.edge_index.to(device), data.batch.to(device), data.__getitem__("nodetoken_ids"), data.__getitem__("gold_edges"),  torch.tensor(data.adj_padded).to(device).float()
+            #x = x / x.sum(1, keepdim=True).clamp(min=1) # Normalize input node features
+            encoding = tokenizer(data.__getitem__("snts"), return_tensors='pt', padding=True, truncation=True).to(device) # not used
+            # Model forward...
+            loss, edge_recall, edge_precision, text_acc, edge_recall_m, edge_precision_m, joint_kl_loss, graph_recon_loss, text_recon_loss = model(x, edge_index, batch, adj_input, gold_edges, True, dec_seq, encoding, nodetoken_ids, src_dict, kl_anneal_w)  
+            batchSize = len(data.snts)
+            epoch_loss += loss.item() * batchSize; 
+            epoch_graph_recon_loss += graph_recon_loss.item() * batchSize
+            epoch_text_recon_loss += text_recon_loss.item() * batchSize
+            epoch_joint_kl_loss += joint_kl_loss.item() * batchSize
+            epoch_edge_recall += edge_recall * batchSize;
+            epoch_edge_precision += edge_precision * batchSize;
+            epoch_text_acc += text_acc * batchSize
+    num_instances = len(loader.dataset)
+    print('DEV Epoch: {}, Loss: {:.3f}, Graph recon loss: {:.3f}, Text recon loss: {:.3f}, Joint kl loss: {:.3f}, Recall: {:.3f}, Precision: {:.3f}, Text acc: {:.3f}, kl_anneal_w: {}'
+          .format(epoch,
+                  epoch_loss/ num_instances,
+                  epoch_graph_recon_loss/num_instances,
+                  epoch_text_recon_loss/num_instances,
+                  epoch_joint_kl_loss/num_instances,
+                  epoch_edge_recall/ num_instances,
+                  epoch_edge_precision/ num_instances,
+                  epoch_text_acc/ num_instances,
+                  kl_anneal_w))
 
 def train_phase_2(train_loader, dev_loader, model, epochs, src_dict, model_name):
     logging.info("trnsize: {}, devsize: {}, num_epochs: {}".format(len(train_loader.dataset), len(dev_loader.dataset), epochs)) 
     print("trnsize: {}, devsize: {}, num_epochs: {}".format(len(train_loader.dataset), len(dev_loader.dataset), epochs)) 
     opt = optim.Adam(model.parameters(), lr=0.001)
+    Nkl= 200
     for epoch in range(epochs):
         model.train()
-        #model.graph_vae.eval()
+        kl_anneal_w =  min(epoch/Nkl, 0.5)
         report = False
         if epoch % 1 == 0:
             report = True
-        epoch_loss = 0; epoch_edge_recall = 0; epoch_edge_precision = 0
+        epoch_loss = 0; epoch_graph_recon_loss = 0; epoch_text_recon_loss = 0; epoch_joint_kl_loss = 0;
+        epoch_edge_recall = 0; epoch_edge_precision = 0; epoch_text_acc = 0; epoch_edge_recall_m = 0; epoch_edge_precision_m = 0
         for step, data in enumerate(train_loader):
             opt.zero_grad()
             dec_seq = data.__getitem__("snttoken_ids")
@@ -301,34 +306,48 @@ def train_phase_2(train_loader, dev_loader, model, epochs, src_dict, model_name)
             for seq in dec_seq:
                 torch_dec_seq.append(torch.tensor(seq, dtype=torch.long))
             dec_seq = torch.stack([torch.cat([i, i.new_ones(max_seq_len - i.size(0))], 0) for i in torch_dec_seq],1).t().to(device)
-            adj_input = torch.tensor(data.adj_padded).to(device).float() #B,maxnode, maxnode
-            x, edge_index, batch, gold_edges = data.x.to(device), data.edge_index.to(device), data.batch.to(device), data.__getitem__("gold_edges")
-            text_batch = data.__getitem__("snts")
-            encoding = tokenizer(text_batch, return_tensors='pt', padding=True, truncation=True).to(device)
-            loss, edge_recall, edge_precision = model(x, edge_index, batch, adj_input, gold_edges, report, dec_seq, encoding)  
+            x, edge_index, batch, nodetoken_ids, gold_edges, adj_input = data.x.to(device), data.edge_index.to(device), data.batch.to(device), data.__getitem__("nodetoken_ids"), data.__getitem__("gold_edges"),  torch.tensor(data.adj_padded).to(device).float()
+            #x = x / x.sum(1, keepdim=True).clamp(min=1) # Normalize input node features
+            encoding = tokenizer(data.__getitem__("snts"), return_tensors='pt', padding=True, truncation=True).to(device) # not used
+            # Model forward...
+            loss, edge_recall, edge_precision, text_acc, edge_recall_m, edge_precision_m, joint_kl_loss, graph_recon_loss, text_recon_loss = model(x, edge_index, batch, adj_input, gold_edges, report, dec_seq, encoding, nodetoken_ids, src_dict, kl_anneal_w)  
             loss.backward()
-            epoch_loss += loss.item(); epoch_edge_recall += edge_recall; epoch_edge_precision += edge_precision
-            opt.step()            
-        print('Epoch: ', epoch, ', Loss: ', epoch_loss/ len(train_loader),', Recall:', epoch_edge_recall/ len(train_loader.dataset),', Precision:', epoch_edge_precision/len(train_loader.dataset))            
-        train_logger.info("epoch {} : epoch loss {}".format(epoch, epoch_loss/ len(train_loader)))
-        train_logger.info("epoch {} : edge recall {}".format(epoch, epoch_edge_recall/ len(train_loader.dataset)))
-        train_logger.info("epoch {} : edge precision {}".format(epoch, epoch_edge_precision/ len(train_loader.dataset)))
-        if epoch % 1 == 0:
-          dev_loss  = dev(dev_loader, model, src_dict, epoch)
-        if epoch % 20 == 0:
-            torch.save(model.state_dict(), model_name+"_"+str(epoch))
-            logging.info("Model saved to: {}".format(model_name+"_"+str(epoch)))
+            opt.step() 
+            batchSize = len(data.snts)
+            epoch_loss += loss.item() * batchSize; 
+            epoch_graph_recon_loss += graph_recon_loss.item() * batchSize
+            epoch_text_recon_loss += text_recon_loss.item() * batchSize
+            epoch_joint_kl_loss += joint_kl_loss.item() * batchSize
+            epoch_edge_recall += edge_recall * batchSize;
+            epoch_edge_precision += edge_precision * batchSize;
+            epoch_text_acc += text_acc * batchSize
+        num_instances = len(train_loader.dataset)
+        if report:
+            print('Epoch: {}, Loss: {:.3f}, Graph recon loss: {:.3f}, Text recon loss: {:.3f}, Joint kl loss: {:.3f}, Recall: {:.3f}, Precision: {:.3f}, Text acc: {:.3f}, kl_anneal_w: {}'
+                  .format(epoch,
+                          epoch_loss/ num_instances,
+                          epoch_graph_recon_loss/num_instances,
+                          epoch_text_recon_loss/num_instances,
+                          epoch_joint_kl_loss/num_instances,
+                          epoch_edge_recall/ num_instances,
+                          epoch_edge_precision/ num_instances,
+                          epoch_text_acc/ num_instances,
+                          kl_anneal_w))
+        #if epoch % 1 == 0:
+        #    dev_loss  = dev(dev_loader, model, src_dict, epoch, kl_anneal_w)
+        #if epoch % 20 == 0:
+        #    torch.save(model.state_dict(), model_name+"_"+str(epoch))
+        #    logging.info("Model saved to: {}".format(model_name+"_"+str(epoch)))
     writer.flush(); writer.close()
     torch.save(model.state_dict(), model_name)
-    logging.info("Model saved to: {}".format(model_name))
+    #logging.info("Model saved to: {}".format(model_name))
 
-    
 
 def load_phase_2_model(path, text_transformer):
     pretrained = GraphVAE(input_dim, 64, 256, nmax)
     pretrained.load_state_dict(torch.load(path))
     pretrained_dict = pretrained.state_dict()
-    model = GraphVAE(input_dim, 64, 256, nmax, text_transformer, 2)#.to(device)
+    model = GraphVAE(input_dim, 64, 256, nmax, phase=2)#.to(device)
     model_dict = model.state_dict()
     pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict} # 1. filter out unnecessary keys
     model_dict.update(pretrained_dict)      # 2. overwrite entries in the existing state dic
@@ -358,13 +377,14 @@ if __name__ == "__main__":
     print("Oh hi")
 
     # Build model...
-    input_dim = 512; latent_dim = 64; 
+    input_dim = 512; latent_dim = 32; graph_mlp_hid_dim = 512
     model_opt["d_graphz"] = latent_dim
 
     translator = build_translator(model_opt)
     text_transformer = translator.model
     fields = translator.fields
     src_dict = fields["src"].vocab
+    src_dict.pad = 1
     nodeembeddings = text_transformer.encoder.embeddings
 
     parser = argparse.ArgumentParser('datareader.py')
@@ -373,11 +393,7 @@ if __name__ == "__main__":
     params = Params.from_file(args.params)
     nmax = 10
     nodelabel_num = 38926
-    refcode = True
-    if refcode:
-        batch_size = 32
-    else:
-        batch_size = 64
+    batch_size = 64
     trn_data_list, dev_data_list, tst_data_list  = loaddata(params, src_dict, nodeembeddings, nmax)
 
     trn_loader = DataLoader(trn_data_list, batch_size=batch_size)     #36519
@@ -392,25 +408,14 @@ if __name__ == "__main__":
     logging.info("batchsize: {}".format(batch_size))
     logging.info("epochs: {}".format(epochs))
     logging.info("nmax: {}".format(nmax))
-
+    
     phase = 1
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
        
     if phase == 1:
         # Phase 1...
-        #model  = GraphVAE(input_dim, latent_dim, 256, nmax)
-        model = load_phase_2_model("model/gtg_20210309-183511_200", text_transformer) 
-
-        for param in model.parameters():
-            param.requires_grad = False
-        for param in model.linear_1.parameters():
-            param.requires_grad = True
-        for param in model.linear_2.parameters():
-            param.requires_grad = True
-
-            
+        model  = GraphVAE(input_dim, latent_dim, graph_mlp_hid_dim, nmax)
+        #model = load_phase_2_model("model/gtg_20210309-183511_200", text_transformer)             
         model.to(device)
         print("model: {}".format(model))
-        #train(trn_loader, dev_loader, model, epochs, src_dict, "gtg_"+timestr)
-        #dev(dev_loader, model, src_dict, 1)
         train_phase_2(trn_loader, dev_loader, model, epochs, src_dict, "gtg_"+timestr)
