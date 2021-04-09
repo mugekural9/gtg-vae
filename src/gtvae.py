@@ -6,7 +6,7 @@ from torch import optim
 import torch.nn.functional as F
 import torch.nn.init as init
 from maxspantree import mst_graph
-from graphvae import GraphVAEM
+from graph_vae import GraphVAE
 from transformers import BertModel
 from torch.nn import Linear
 from transformers import BertModel, BertConfig
@@ -15,21 +15,24 @@ from text_vae import DAE
 # Initializing a BERT bert-base-uncased style configuration
 configuration = BertConfig()
 
-class GraphVAE(nn.Module):
-    def __init__(self, input_dim, latent_dim, mlp_hid_dim, max_num_nodes, text_encoder=None, phase=1):
-        super(GraphVAE, self).__init__()
+class GTVAE(nn.Module):
+    def __init__(self, input_dim, latent_dim, mlp_hid_dim, max_num_nodes, text_vocab, phase=1):
+        super(GTVAE, self).__init__()
         output_dim = max_num_nodes * (max_num_nodes + 1) // 2
-        self.graph_vae_encoder = GraphVAEM(input_dim, latent_dim, max_num_nodes, 38926, 1)    
+        self.graph_vae_encoder = GraphVAE(input_dim, latent_dim, max_num_nodes, 38926, 1)    
         self.graph_vae_decoder = MLP_VAE_plain(latent_dim, mlp_hid_dim, output_dim, max_num_nodes, 38926)
-        self.text_vae = DAE(latent_dim)
+        self.text_vae = DAE(latent_dim, text_vocab)
         self.joint_mu_linear_1  = nn.Linear(latent_dim, 512)
-        self.joint_mu_linear_2  = nn.Linear(512, latent_dim)
         self.joint_var_linear_1 = nn.Linear(latent_dim, 512)
+        self.joint_mu_linear_2  = nn.Linear(512, latent_dim)
         self.joint_var_linear_2  = nn.Linear(512, latent_dim)
-        self.bn = nn.BatchNorm1d(latent_dim)
+
         self.max_num_nodes = max_num_nodes
         self.phase= phase
+        self.zg_emb = nn.Linear(latent_dim, latent_dim)
+        self.drop = nn.Dropout(0.5)
 
+        
     def recover_adj_lower(self, l):
         # NOTE: Assumes 1 per minibatch
         adj = torch.zeros(self.max_num_nodes, self.max_num_nodes)
@@ -51,13 +54,13 @@ class GraphVAE(nn.Module):
     def loss_kl(self, mu, logvar):
         return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / len(mu)
 
-    def forward(self, x, edge_index, batch, adj, gold_edges, report, dec_seq, encoding, nodetoken_ids, src_dict, kl_anneal_w):
+    def forward(self, x, edge_index, batch, adj, gold_edges, report, dec_seq, encoding, nodetoken_ids, kl_anneal_w):
         B, maxnode, _ = adj.size()
         total_loss           = 0;
         graph_recon_loss     = 0; 
         text_recon_loss      = 0 
-        total_edge_recall    = 0 
-        total_edge_precision = 0 
+        total_edge_recall    = torch.tensor(0).float() 
+        total_edge_precision = torch.tensor(0).float() 
         total_edge_recall_m = torch.tensor(0).float(); total_edge_precision_m = torch.tensor(0).float()
 
         # Encode graph...
@@ -70,23 +73,31 @@ class GraphVAE(nn.Module):
 
         # Encode graph and text together...     
         # exp1
-        # joint_mu  = self.joint_mu_linear_2(F.relu(self.joint_mu_linear_1(torch.cat((graph_mu, text_mu), dim=1))))
-        # joint_var = self.joint_var_linear_2(F.relu(self.joint_var_linear_1(torch.cat((graph_var, text_var), dim=1))))
+        #joint_mu  = self.joint_mu_linear_2(F.relu(self.joint_mu_linear_1(torch.cat((graph_mu, text_mu), dim=1))))
+        #joint_var = self.joint_var_linear_2(F.relu(self.joint_var_linear_1(torch.cat((graph_var, text_var), dim=1))))
         # exp2
-        joint_mu   = self.bn(self.joint_mu_linear_2(F.relu(self.joint_mu_linear_1((graph_mu + text_mu)/2))))
-        joint_var  = self.bn(self.joint_var_linear_2(F.relu(self.joint_var_linear_1((graph_var + text_var)/2))))
+        joint_mu   = self.joint_mu_linear_2(F.relu(self.joint_mu_linear_1((graph_mu + text_mu) /2)))
+        joint_var  = self.joint_var_linear_2(F.relu(self.joint_var_linear_1((graph_var + text_var) /2)))
+
+        #ver1
         joint_kl_loss = self.loss_kl(joint_mu, joint_var)
         joint_z = self.reparameterize(joint_mu, joint_var)
+        input_z = self.drop(graph_mu) + self.zg_emb(joint_z)
+
+        #ver2
+        #joint_kl_loss = self.loss_kl(text_mu, text_var)
+        #joint_z = self.reparameterize(text_mu, text_var)
 
         # Decode text...
         logits, _ = self.text_vae.decode(joint_z, inputs)
         text_recon_loss = self.text_vae.loss_rec(logits, targets).mean()
-        text_acc = self.text_vae.accuracy(logits, targets, src_dict)
+        text_acc = self.text_vae.accuracy(logits, targets)
+
         #if src_dict is not None and report:
         #     self.text_vae.generate(joint_z, 20, 'greedy', src_dict)
        
         # Decode graph...
-        h_decode = self.graph_vae_decoder(joint_z) 
+        h_decode = self.graph_vae_decoder(input_z) 
         out = F.sigmoid(h_decode)
         out_tensor = out.cpu().data       
         # Graph reconstruction...
@@ -108,7 +119,7 @@ class GraphVAE(nn.Module):
         graph_recon_loss /= B
         total_edge_recall /= B
         total_edge_precision /= B
-        total_loss =  ((1-kl_anneal_w) * (graph_recon_loss + text_recon_loss)) + (kl_anneal_w * joint_kl_loss) 
+        total_loss =  graph_recon_loss + text_recon_loss + (kl_anneal_w * joint_kl_loss) 
         return total_loss, total_edge_recall, total_edge_precision, text_acc, total_edge_recall_m, total_edge_precision_m, joint_kl_loss , graph_recon_loss, text_recon_loss
 
     def adj_recon_loss(self, adj_truth, adj_pred):

@@ -5,8 +5,10 @@ from collections import defaultdict, Counter
 import penman
 import networkx as nx
 
-from data.vocabulary import DEFAULT_PADDING_TOKEN, DEFAULT_OOV_TOKEN
-from data.dataset_readers.amr_parsing.graph_repair import GraphRepair
+DEFAULT_PADDING_TOKEN = "@@PADDING@@"
+DEFAULT_OOV_TOKEN = "@@UNKNOWN@@"
+
+from amr_parsing.graph_repair import GraphRepair
 from utils.string import find_similar_token, is_abstract_token, is_english_punct
 from utils import logging
 
@@ -271,7 +273,7 @@ class AMRGraph(penman.Graph):
 
             edge_set.add((source, target))
             G.add_edge(source, target, label=relation)
-            #G.add_edge(target, source, label=relation) # I ADDED THIS
+            G.add_edge(target, source, label=relation) # I ADDED THIS
         self._G = G
 
     def attributes(self, source=None, relation=None, target=None):

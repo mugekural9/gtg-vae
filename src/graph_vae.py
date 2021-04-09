@@ -5,7 +5,7 @@ from torch_geometric.utils import negative_sampling, remove_self_loops, add_self
 from sklearn.metrics import roc_auc_score, average_precision_score
 from torch_geometric.nn import global_max_pool
 from vgae_encoder import VGAE_encoder
-from vgae_decoder import VGAE_decoder
+
 import pdb, math
 from maxspantree import mst_graph
 MAX_LOGSTD = 10
@@ -13,9 +13,9 @@ EPS = 1e-15
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
 
 
-class GraphVAEM(torch.nn.Module):
+class GraphVAE(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, nmax, nodelabel_num, phase):
-       super(GraphVAEM, self).__init__()
+       super(GraphVAE, self).__init__()
        self.phase = phase
        self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
        #self.decoder = VGAE_decoder(hidden_dim, nmax, nodelabel_num, phase)

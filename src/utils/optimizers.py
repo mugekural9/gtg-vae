@@ -1,8 +1,7 @@
 """ Optimizers class """
 import torch
 import torch.optim as optim
-from torch.nn.utils import clip_grad_norm_
-
+from torch.nn.utils import clip_grad_norm
 from utils.misc import use_gpu
 
 

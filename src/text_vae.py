@@ -23,23 +23,24 @@ class TextModel(nn.Module):
     def __init__(self,  initrange=0.1):
         super().__init__()
         self.embed = nn.Embedding(38926, 512)
-        self.proj = nn.Linear(512, 38926)
+        self.proj = nn.Linear(1024, 38926)
         self.embed.weight.data.uniform_(-initrange, initrange)
         self.proj.bias.data.zero_()
         self.proj.weight.data.uniform_(-initrange, initrange)
 
 class DAE(TextModel):
     """Denoising Auto-Encoder"""
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, vocab):
         super().__init__()
         self.drop = nn.Dropout(0.5)
-        self.E = nn.LSTM(512, 512, 1,
-                         dropout=0.2, bidirectional=False)
-        self.G = nn.LSTM(512, 512, 1,
+        self.E = nn.LSTM(512, 1024, 1,
+                         dropout=0.2, bidirectional=True)
+        self.G = nn.LSTM(512, 1024, 1,
                          dropout=0.2)
-        self.h2mu = nn.Linear(512, latent_dim)
-        self.h2logvar = nn.Linear(512, latent_dim)
+        self.h2mu = nn.Linear(2048, latent_dim)
+        self.h2logvar = nn.Linear(2048, latent_dim)
         self.z2emb = nn.Linear(latent_dim, 512)
+        self.vocab = vocab
         #self.opt = optim.Adam(self.parameters(), lr=0.0005, betas=(0.5, 0.999))
 
     def flatten(self):
@@ -48,8 +49,8 @@ class DAE(TextModel):
 
     def encode(self, input):
         input = self.drop(self.embed(input))
-        _, (hes, _) = self.E(input)
-        hes = torch.squeeze(hes,0) #torch.cat([h[-2], h[-1]], 1)
+        _, (h, _) = self.E(input)
+        hes = torch.cat([h[-2], h[-1]], 1) # torch.squeeze(hes,0)
         return self.h2mu(hes), self.h2logvar(hes)
 
     def decode(self, z, input, hidden=None):
@@ -59,8 +60,11 @@ class DAE(TextModel):
         logits = self.proj(output.view(-1, output.size(-1)))
         return logits.view(output.size(0), output.size(1), -1), hidden
 
-    def forward(self, input, graph_z=None, src_dict=None, is_train=False):
-        _input = input #noisy(self.vocab, input, *self.args.noise) if is_train else input
+    def forward(self, input, graph_z=None, is_train=False):
+        if False:# self.training:
+            _input = noisy(self.vocab, input, 0.2) 
+        else:
+            _input = input
         mu, logvar = self.encode(_input)
         # z = reparameterize(mu, logvar)
         # logits, _ = self.decode(z, input)
@@ -73,7 +77,7 @@ class DAE(TextModel):
             ignore_index=1, reduction='none').view(targets.size())
         return loss.mean(dim=0)#loss.sum(dim=0)
 
-    def accuracy(self, logits, targets, src_dict):
+    def accuracy(self, logits, targets):
         T, B = targets.size()
         sft = nn.Softmax(dim=2)
         pred_tokens = torch.argmax(sft(logits),2) # T,B
@@ -95,8 +99,8 @@ class DAE(TextModel):
     def loss(self, losses):
         return losses['rec']
 
-    def autoenc(self, inputs, targets, graph_z=None, src_dict=None, is_train=False):
-        mu, logvar = self(inputs, graph_z, src_dict, is_train) # z, logits
+    def autoenc(self, inputs, targets, graph_z=None, is_train=False):
+        mu, logvar = self(inputs, graph_z, is_train) # z, logits
         return mu, logvar #z #self.loss_rec(logits, targets).mean(), z
 
     def step(self, losses):
@@ -107,7 +111,7 @@ class DAE(TextModel):
         self.opt.step()
 
    
-    def generate(self, z, max_len, alg, src_dict):
+    def generate(self, z, max_len, alg):
         assert alg in ['greedy' , 'sample' , 'top5']
         sents = []
         input = torch.zeros(1, len(z), dtype=torch.long, device=z.device).fill_(2)
@@ -138,8 +142,8 @@ class DAE(TextModel):
             # print("\ngold_tokens:", gold_tokens)
             for tok in predicted_tokens[i]:
                 tok = tok.item()
-                if tok < len(src_dict):
-                    tokens.append(src_dict.itos[tok].replace("~", "_"))          
+                if tok < len(self.vocab):
+                    tokens.append(self.vocab.itos[tok].replace("~", "_"))          
             print("tokens:", tokens)
 
         return torch.cat(sents)

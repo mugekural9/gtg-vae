@@ -1,10 +1,6 @@
 from collections import defaultdict
-
 from utils import logging
-
-
 logger = logging.init_logger()
-
 
 def is_similar(instances1, instances2):
     if len(instances1) < len(instances2):
