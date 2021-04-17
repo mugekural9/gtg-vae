@@ -1,161 +1,131 @@
 import torch
 import torch.nn as nn
-from torch_geometric.nn import InnerProductDecoder
+import pdb, math
+import torch.nn.functional as F
 from torch_geometric.utils import negative_sampling, remove_self_loops, add_self_loops
 from sklearn.metrics import roc_auc_score, average_precision_score
-from torch_geometric.nn import global_max_pool
-from vgae_encoder import VGAE_encoder
-
-import pdb, math
+from torch_geometric.nn import global_max_pool, GCNConv
 from maxspantree import mst_graph
+
 MAX_LOGSTD = 10
-EPS = 1e-15
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')   
 
-
 class GraphVAE(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim, nmax, nodelabel_num, phase):
+    def __init__(self, input_dim, latent_dim, mlp_hid_dim, nmax, phase):
        super(GraphVAE, self).__init__()
        self.phase = phase
-       self.encoder = VGAE_encoder(input_dim, out_channels=hidden_dim)
-       #self.decoder = VGAE_decoder(hidden_dim, nmax, nodelabel_num, phase)
-    
-    def reparametrize(self, mu, logstd):
-        if self.training:
-            return mu + torch.randn_like(logstd) * torch.exp(logstd)
-        else:
-            return mu
-
+       self.nmax = nmax
+       output_dim = nmax * (nmax + 1) // 2
+       self.encoder = VGAE_encoder(input_dim, out_channels=latent_dim)
+       self.decoder = MLP_VAE_plain(latent_dim, mlp_hid_dim, output_dim, nmax)
+       
     def encode(self, batch, *args, **kwargs):
-        self.__mu__, self.__logstd__ = self.encoder(*args, **kwargs)
-        self.__logstd__ = self.__logstd__.clamp(max=MAX_LOGSTD)
-        self.__mu__ = global_max_pool(self.__mu__, batch)          # (B,Zdim)
-        self.__logstd__ = global_max_pool(self.__logstd__, batch)  # (B,Zdim)
+        self.__h__ = self.encoder(*args, **kwargs)
+        #self.__logstd__ = self.__logstd__.clamp(max=MAX_LOGSTD)
+        self.__h__ = global_max_pool(self.__h__, batch)          # (B,Zdim)
+        #self.__logstd__ = global_max_pool(self.__logstd__, batch)  # (B,Zdim)
         #z = self.reparametrize(self.__mu__, self.__logstd__)
-        return self.__mu__, self.__logstd__
+        return self.__h__ #self.__logstd__
 
-    def decode(self, *args, **kwargs):
-        r"""Runs the decoder and computes edge probabilities."""
-        return self.decoder(*args, **kwargs)
-
-    def kl_loss(self):
-        return -0.5 * torch.mean(torch.sum(1 + 2 * self.logstd - self.mu**2 - self.logstd.exp()**2, dim=1))
-
-    '''
-    def recon_loss(self, adj_matrix, nodelabel_scores, x, pos_edge_index, batch, nodetoken_ids, src_dict, phase, gold_edges, neg_edge_index, adj_input):
-        """
-        pos_edge_index: (2, num_of_edges)
-        adj_matrix: (B, maxnode, maxnode)
-        nodelabel_scores: (B, maxnode, nodelabel_num)
-        x: (maxnode, nodefeatures)
-        nodetoken_ids: (B, maxnode)
-        """
-        B, maxnode = nodetoken_ids.size()
-        
-        if False: # self.phase == 2:
-            # Nodelabel loss...
-            # Create indexing matrix for batch: [batch, 1]
-            batch_index = torch.arange(0, B).view(B, 1)
-            node_index  = torch.arange(0, maxnode).view(1, maxnode).repeat(B, 1)
-            m =  nn.Softmax(dim=2)
-            _nodelabel_probs = m(nodelabel_scores)
-            nodelabel_probs = _nodelabel_probs[batch_index, node_index, nodetoken_ids.data]
-            nodelabel_loss = -torch.log(nodelabel_probs + 1e-15).mean()
-            predicted_node_tokens = torch.argmax(nodelabel_scores,2) # (B, maxnode)
-            nodelabel_acc = (predicted_node_tokens == nodetoken_ids).sum() / (B*maxnode)
-            
-            if False:
-                # See predictions...
-                for i in range(len(predicted_node_tokens)):
-                    tokens = []; gold_tokens = []
-                    for tok in nodetoken_ids[i]:
-                        tok = tok.item()
-                        if tok < len(src_dict):
-                            gold_tokens.append(src_dict.itos[tok].replace("~", "_"))          
-                    print("\ngold_tokens:", gold_tokens)
-                    for tok in predicted_node_tokens[i]:
-                        tok = tok.item()
-                        if tok < len(src_dict):
-                            tokens.append(src_dict.itos[tok].replace("~", "_"))          
-                    print("tokens:", tokens)
-
-        # Kl loss
-        if phase == 1:
-            kl_loss =  self.kl_loss() / x.size(0)
-        elif phase == 2:
-            kl_loss =  torch.tensor(0)
-
-        # Adjacency matrix loss...                 
-        _src   = torch.remainder(pos_edge_index[0], maxnode)
-        _tgt   = torch.remainder(pos_edge_index[1], maxnode)
-        _batch = torch.floor(pos_edge_index[0] / maxnode)
-        pos_prob = adj_matrix[_batch.detach().cpu().numpy(), _src.detach().cpu().numpy(), _tgt.detach().cpu().numpy()].squeeze(0)
-        pos_loss = -torch.log(pos_prob + EPS).mean()
-
-        # Do not include self-loops in negative samples
-        _neg_edge_index = negative_sampling(pos_edge_index, num_neg_samples=pos_edge_index.size(1)) 
-        neg_edge_index = torch.cat((_neg_edge_index, neg_edge_index), 1)
-        _src   = torch.remainder(neg_edge_index[0], maxnode)
-        _tgt   = torch.remainder(neg_edge_index[1], maxnode)
-        _batch = torch.floor(neg_edge_index[0] / maxnode)
-        neg_prob = adj_matrix[_batch.detach().cpu().numpy(), _src.detach().cpu().numpy(), _tgt.detach().cpu().numpy()].squeeze(0)
-        neg_loss = -torch.log(1-neg_prob + EPS).mean()
-        
-        edge_recall, edge_precision = self.graph_statistics(adj_matrix, pos_edge_index, gold_edges, adj_input)
-        # roc_auc_score, avg_precision_score = self.test(pos_prob, neg_prob, pos_edge_index, neg_edge_index)
-        roc_auc_score, avg_precision_score = torch.tensor(0), torch.tensor(0)
-        nodelabel_loss, nodelabel_acc = torch.tensor(0), torch.tensor(0)
-        return kl_loss, pos_loss, neg_loss, nodelabel_loss, roc_auc_score, avg_precision_score, nodelabel_acc, edge_recall, edge_precision
-
+    def decode(self, z):
+        out = self.decoder(z)
+        return out
     
-    def test(self, pos_pred, neg_pred, pos_edge_index, neg_edge_index):
-        r"""Given latent variables :obj:`z`, positive edges
-        :obj:`pos_edge_index` and negative edges :obj:`neg_edge_index`,
-        computes area under the ROC curve (AUC) and average precision (AP)
-        scores.
+    def loss(self, out, adj, gold_edges, report):
+        adj = torch.tensor(adj).float()
+        B, maxnode, _ = adj.size()
+        out_tensor = out.cpu().data       
+        graph_recon_loss = 0
+        total_edge_recall    = torch.tensor(0).float() 
+        total_edge_precision = torch.tensor(0).float() 
+        # Graph reconstruction...
+        for b in range(B):
+            _out_tensor = out_tensor[b,:].unsqueeze(0)
+            recon_adj_lower = self.recover_adj_lower(_out_tensor) 
+            recon_adj_tensor = self.recover_full_adj_from_lower(recon_adj_lower) # make symmetric
+            adj_data = adj[b].cpu().data #[0]
+            adj_permuted = adj_data
+            adj_vectorized = adj_permuted[torch.triu(torch.ones(self.nmax,self.nmax))== 1].squeeze_()
+            adj_vectorized_var = adj_vectorized.cuda()
+            adj_recon_loss = self.adj_recon_loss(out[b], adj_vectorized_var)
+            graph_recon_loss += adj_recon_loss
+            if report:
+                edge_recall, edge_precision = self.graph_statistics(recon_adj_tensor, list(gold_edges[b]), report)
+                total_edge_recall += edge_recall
+                total_edge_precision += edge_precision
+        graph_recon_loss /= B
+        total_edge_recall /= B
+        total_edge_precision /= B
+        return graph_recon_loss, total_edge_recall, total_edge_precision
 
-        Args:
-            z (Tensor): The latent space :math:`\mathbf{Z}`.
-            pos_edge_index (LongTensor): The positive edges to evaluate
-                against.
-            neg_edge_index (LongTensor): The negative edges to evaluate
-                against.
-        """
-        
-        pos_y = pos_pred.new_ones(pos_edge_index.size(1)) #276
-        neg_y = pos_pred.new_zeros(neg_edge_index.size(1)) #276 
-        y = torch.cat([pos_y, neg_y], dim=0) #552 
+    def recover_adj_lower(self, l):
+        # NOTE: Assumes 1 per minibatch
+        adj = torch.zeros(self.nmax, self.nmax)
+        adj[torch.triu(torch.ones(self.nmax, self.nmax)) == 1] = l
+        return adj
 
-        pred = torch.cat([pos_pred, neg_pred], dim=0) #552
-        y, pred = y.detach().cpu().numpy(), pred.detach().cpu().numpy()
-    
-        return roc_auc_score(y, pred), average_precision_score(y, pred)
+    def recover_full_adj_from_lower(self, lower):
+        diag = torch.diag(torch.diag(lower, 0))
+        return lower + torch.transpose(lower, 0, 1) - diag
 
-    def graph_statistics(self, adj_matrix, pos_edge_index, gold_edges, adj_input):
-        #print(adj_input)
-        #breakpoint()
+    def adj_recon_loss(self, adj_pred, adj_truth):
+        # F.binary_cross_entropy(adj_truth, adj_pred)
+        return F.binary_cross_entropy(adj_pred, adj_truth)
+
+    def graph_statistics(self, adj_matrix, gold_edges, report):
         pred_edges = mst_graph(adj_matrix)
-        count = 0
-        gold_edgelength = 0
-        pred_edgelength = 0
-        for b in pred_edges.keys():
-            if gold_edges is not None:
-                gold_edgelength += len(gold_edges[b])
-            if pred_edges is not None:
-                pred_edgelength += len(pred_edges[b])
-            #print("\npred_edges[b]:", pred_edges[b])
-            #print("gold_edges[b]:", gold_edges[b])
-            for j in pred_edges[b]:
-                if (j[0],j[1]) in gold_edges[b] or (j[1], j[0]) in gold_edges[b]:
-                    count += 1
-
+        count = 0; gold_edgelength = 0; pred_edgelength = 0                
+        if gold_edges is not None:
+            gold_edgelength += len(gold_edges)
+        if pred_edges is not None:
+            pred_edgelength += len(pred_edges)
+        for j in pred_edges:
+            if (j[0],j[1]) in gold_edges or (j[1], j[0]) in gold_edges:
+                count += 1
         if gold_edgelength == 0 or pred_edgelength == 0:
-            return torch.tensor(0), torch.tensor(0) ## check this!
-        edge_recall = torch.tensor(count / gold_edgelength) 
-        edge_precision = torch.tensor(count/ pred_edgelength)
-        # print("\ngold_edges:", gold_edges)
-        # print("pred_edges:", pred_edges)
-        # print("edge_recall:", edge_recall)
-        # print("edge_precision:", edge_precision)
+            return torch.tensor(1), torch.tensor(1) ## check this!
+        edge_recall = count / gold_edgelength
+        edge_precision = count/ pred_edgelength
+        if False: #report:
+            print("\ngold_edges:", gold_edges)
+            print("pred_edges:", pred_edges)        
         return edge_recall, edge_precision
-    '''
+
+    
+class VGAE_encoder(torch.nn.Module):
+    def __init__(self, in_channels, out_channels):
+       super(VGAE_encoder, self).__init__()
+       self.hidden_channels = out_channels * 2
+       self.conv1 = GCNConv(in_channels, self.hidden_channels)
+       self.relu = nn.ReLU()
+       self.conv2 = GCNConv(self.hidden_channels, out_channels)
+       #self.conv2_mu  = GCNConv( self.hidden_channels, out_channels)
+       #self.conv2_sig = GCNConv( self.hidden_channels, out_channels)
+       
+       
+    def forward(self, x, edge_index):
+        x = self.relu(self.conv1(x, edge_index))
+        #x_mu = self.conv2_mu(x,edge_index)
+        #x_sig = self.conv2_sig(x,edge_index)
+        return self.conv2(x, edge_index)  #x_mu,x_sig
+
+    
+class MLP_VAE_plain(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, nmax):
+        super(MLP_VAE_plain, self).__init__()
+        self.decode_1 = nn.Linear(input_dim, hidden_dim)
+        self.relu = nn.ReLU()
+        self.decode_2 = nn.Linear(hidden_dim, output_dim) 
+        self.sigmoid = nn.Sigmoid()
+
+        self.nmax = nmax
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.weight.data = nn.init.xavier_uniform(m.weight.data, gain=nn.init.calculate_gain('relu'))
+                
+    def forward(self, h):
+        y = self.decode_1(h)
+        y = self.relu(y)
+        y = self.decode_2(y)
+        out = self.sigmoid(y)
+        return out

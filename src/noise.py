@@ -9,14 +9,15 @@ def word_shuffle(vocab, x, k):   # slight shuffle such that |sigma[i]-i| <= k
     _, sigma = (base + inc).sort(dim=0)
     return x[sigma, torch.arange(x.size(1))]
 
-def word_drop(vocab, x, p):     # drop words with probability p
+def word_drop(padidx, x, p):     # drop words with probability p
     x_ = []
     for i in range(x.size(1)):
         words = x[:, i].tolist()
         keep = np.random.rand(len(words)) > p
         keep[0] = True  # do not drop the start sentence symbol
         sent = [w for j, w in enumerate(words) if keep[j]]
-        sent += [vocab.pad] * (len(words)-len(sent))
+        sent += [padidx] * (len(words)-len(sent))
+        #sent += [0] * (len(words)-len(sent))
         x_.append(sent)
     return torch.LongTensor(x_).t().contiguous().to(x.device)
 
@@ -35,11 +36,11 @@ def word_substitute(vocab, x, p):     # substitute words with probability p
     x_[keep] = x[keep]
     return x_
 
-def noisy(vocab, x, drop_prob, blank_prob, sub_prob, shuffle_dist):
+def noisy(padidx, x, drop_prob, blank_prob, sub_prob, shuffle_dist):
     if shuffle_dist > 0:
         x = word_shuffle(vocab, x, shuffle_dist)
     if drop_prob > 0:
-        x = word_drop(vocab, x, drop_prob)
+        x = word_drop(padidx, x, drop_prob)
     if blank_prob > 0:
         x = word_blank(vocab, x, blank_prob)
     if sub_prob > 0:
